@@ -144,30 +144,48 @@ public extension EdgeClient {
 
         continuation.yield(EdgeEvent(kind: .connected, raw: Data()))
 
+        // Foundation's URLSession.bytes(for:).lines silently
+        // collapses consecutive newlines into a single delimiter, so
+        // we never see the empty-line separator that SSE uses
+        // between events. We work around it by dispatching whenever
+        // we encounter a line that signals the *start* of a new
+        // event or a comment/heartbeat — both indicate the previous
+        // event block is complete on the wire.
         var eventName = ""
         var dataBuf = Data()
+        let flush: () -> Void = {
+            guard !eventName.isEmpty, !dataBuf.isEmpty else { return }
+            continuation.yield(EdgeEvent.parse(eventName: eventName, data: dataBuf))
+            eventName = ""
+            dataBuf = Data()
+        }
         for try await line in bytes.lines {
-            if line.isEmpty {
-                if !eventName.isEmpty && !dataBuf.isEmpty {
-                    continuation.yield(EdgeEvent.parse(eventName: eventName, data: dataBuf))
-                }
-                eventName = ""
-                dataBuf = Data()
+            // (debug prints removed; the parser path is exercised
+            // by an integration test in EdgeIntegrationTests when
+            // EDGE_INTEGRATION=1 is set)
+            if line.hasPrefix(":") {
+                // Comment / heartbeat — also a valid event boundary.
+                flush()
                 continue
             }
-            if line.hasPrefix(":") {
-                continue // SSE comment / heartbeat
+            if line.isEmpty {
+                // Real empty line (rare, but handle it correctly if
+                // a future Foundation release stops collapsing them).
+                flush()
+                continue
             }
             if let rest = line.dropPrefixIfPresent("event: ") {
+                // New event — flush any prior one before starting.
+                flush()
                 eventName = rest
             } else if let rest = line.dropPrefixIfPresent("data: ") {
                 if !dataBuf.isEmpty {
-                    dataBuf.append(0x0A) // newline join, per SSE spec
+                    dataBuf.append(0x0A) // SSE multi-line data join
                 }
-                let chunk = Data(rest.utf8)
-                dataBuf.append(chunk)
+                dataBuf.append(Data(rest.utf8))
             }
         }
+        flush() // final event on stream end
     }
 }
 
