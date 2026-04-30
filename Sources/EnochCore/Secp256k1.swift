@@ -25,6 +25,7 @@ public enum Secp256k1 {
         case invalidPrivateKeyLength(Int)
         case invalidDigestLength(Int)
         case invalidSignature(Swift.Error)
+        case invalidPublicKey(Swift.Error)
         case keyGen(Swift.Error)
     }
 
@@ -93,6 +94,21 @@ public enum Secp256k1 {
 
     public struct PublicKey {
         fileprivate let inner: P256K.Signing.PublicKey
+
+        fileprivate init(inner: P256K.Signing.PublicKey) {
+            self.inner = inner
+        }
+
+        /// Reconstruct from a 33-byte compressed (SEC1) pubkey — the
+        /// form stashed alongside privkey-bearing Keychain items so
+        /// receive-address rendering doesn't need a biometric prompt.
+        public init(compressed: Data) throws {
+            do {
+                self.inner = try P256K.Signing.PublicKey(dataRepresentation: compressed, format: .compressed)
+            } catch {
+                throw Error.invalidPublicKey(error)
+            }
+        }
 
         /// Compressed (33-byte) SEC1 encoding — what Bitcoin Script
         /// scriptSigs push after the signature.
