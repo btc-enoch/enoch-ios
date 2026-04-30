@@ -15,4 +15,13 @@ public enum Hashing {
         let second = SHA256.hash(data: Data(first))
         return Data(second)
     }
+
+    /// HASH160 = RIPEMD160(SHA256(x)). The 20-byte pubkey-hash that
+    /// P2PKH scripts (and Enoch L2 addresses) use as their identity.
+    /// Apple's CryptoKit doesn't ship RIPEMD160 — we compose with
+    /// our local pure-Swift implementation.
+    public static func hash160(_ data: Data) -> Data {
+        let sha = SHA256.hash(data: data)
+        return RIPEMD160.hash(Data(sha))
+    }
 }

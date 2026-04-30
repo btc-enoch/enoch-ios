@@ -51,6 +51,28 @@ final class AddressTests: XCTestCase {
         XCTAssertThrowsError(try Address.decodeToPKH("not-an-address"))
     }
 
+    /// Gold-standard cross-check: alice's actual pubkey from a real
+    /// regtest tx (extracted from her scriptSig) hashes through
+    /// HASH160 + bech32 to her actual stored enoch1 address. Proves
+    /// RIPEMD160, SHA256 composition, bech32, and the encoder all
+    /// agree with the operator side end-to-end.
+    func testEnochAddressDerivationMatchesOperator() throws {
+        let pubBytes = try Data(hex: "03716d4b4281cd60ad2e3a8cb36cc92dcc870ac5355bce04abb80cbb135a3d063f")
+        let pub = try Secp256k1.PublicKey(compressed: pubBytes)
+        let addr = try Address.encodeEnoch(publicKey: pub)
+        XCTAssertEqual(addr, "enoch12hgh7g39q5w6rwdhmvn6lxk30m8jwce2rq6w36")
+    }
+
+    /// Sanity round-trip via the new pubkey overload: derive an
+    /// address, decode it back to a pkh, confirm it equals
+    /// HASH160(pubkey).
+    func testDerivedAddressRoundTripsToHash160() throws {
+        let key = try Secp256k1.PrivateKey()
+        let addr = try Address.encodeEnoch(publicKey: key.publicKey)
+        let pkh = try Address.decodeToPKH(addr)
+        XCTAssertEqual(pkh, Hashing.hash160(key.publicKey.compressedBytes))
+    }
+
     /// Wrong pkh length on encode is a programmer error — surface it
     /// with the real length, not a generic "invalid" error.
     func testEncodeWrongLengthRejected() {

@@ -22,6 +22,14 @@ public enum Address {
     /// HRP for Enoch L2 bech32 addresses.
     public static let enochHRP = "enoch"
 
+    /// Derive the wallet's `enoch1...` address from its public key —
+    /// HASH160(compressed-pubkey) → bech32(HRP=enoch). Same shape the
+    /// operator uses internally to key UTXOs by pkh.
+    public static func encodeEnoch(publicKey: Secp256k1.PublicKey) throws -> String {
+        let pkh = Hashing.hash160(publicKey.compressedBytes)
+        return try encodeEnoch(pkh: pkh)
+    }
+
     /// Encode a 20-byte pkh as `enoch1...`.
     public static func encodeEnoch(pkh: Data) throws -> String {
         guard pkh.count == 20 else {
