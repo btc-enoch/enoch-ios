@@ -23,6 +23,10 @@ let package = Package(
             name: "EnochCore",
             targets: ["EnochCore"]
         ),
+        .library(
+            name: "EnochUI",
+            targets: ["EnochUI"]
+        ),
     ],
     dependencies: [
         // ECDSA over secp256k1. Apple's CryptoKit doesn't include the
@@ -41,6 +45,14 @@ let package = Package(
         ),
         .testTarget(
             name: "EnochCoreTests",
+            dependencies: ["EnochCore"]
+        ),
+        // SwiftUI views + ViewStore wiring. Splits into a separate
+        // library so the Xcode app target can be a thin @main shell
+        // while everything reusable lives here, previewable in
+        // isolation without the project bundle.
+        .target(
+            name: "EnochUI",
             dependencies: ["EnochCore"]
         ),
     ]
