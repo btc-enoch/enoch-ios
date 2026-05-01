@@ -64,12 +64,14 @@ public struct OperatorInfo: Codable, Equatable {
 
 /// Loose decode of the operator's fee schedule — wallet displays
 /// the per-tx fee but doesn't depend on every field, so we accept
-/// missing keys without failing.
+/// missing keys without failing. The wire key is `per_tx_fee`
+/// (matching the operator's Go struct); we expose it under a
+/// `*Satoshi` Swift name to make the unit explicit at call sites.
 public struct FeeSchedule: Codable, Equatable {
     public let perTxFeeSatoshi: UInt64?
 
     enum CodingKeys: String, CodingKey {
-        case perTxFeeSatoshi = "per_tx_fee_satoshi"
+        case perTxFeeSatoshi = "per_tx_fee"
     }
 }
 

@@ -35,7 +35,7 @@ final class TxBuilderTests: XCTestCase {
                     "watchtower_pool_address": "enoch1",
                     "reserve_address": "enoch1", "bridge_deposit_address": "2N",
                     "withdrawal_challenge_window": 100, "current_height": 1,
-                    "fee_schedule": { "per_tx_fee_satoshi": \(feePerTx) }
+                    "fee_schedule": { "per_tx_fee": \(feePerTx) }
                   }
                 }
                 """

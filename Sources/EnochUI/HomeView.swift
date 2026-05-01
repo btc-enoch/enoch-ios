@@ -17,7 +17,8 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 24) {
                 BalanceCard(balance: wallet.balance, utxoCount: wallet.utxoCount)
                 ActionRow()
-                RecentActivity(history: Array(wallet.history.prefix(5)))
+                RecentActivity(history: Array(wallet.history.prefix(5)),
+                               totalCount: wallet.history.count)
             }
             .padding()
         }
@@ -64,13 +65,11 @@ private struct ActionRow: View {
             } label: {
                 ActionButtonLabel(title: "Receive", systemImage: "arrow.down.left")
             }
-            // Send screen lands in Phase 5b; placeholder for layout.
-            Button {
-                // no-op
+            NavigationLink {
+                SendView()
             } label: {
                 ActionButtonLabel(title: "Send", systemImage: "arrow.up.right")
             }
-            .disabled(true)
         }
     }
 }
@@ -93,12 +92,22 @@ private struct ActionButtonLabel: View {
 
 private struct RecentActivity: View {
     let history: [AddressHistoryEntry]
+    let totalCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Recent activity")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Recent activity")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if totalCount > history.count {
+                    NavigationLink("See all (\(totalCount))") {
+                        HistoryView()
+                    }
+                    .font(.caption)
+                }
+            }
             if history.isEmpty {
                 Text("No transactions yet.")
                     .font(.callout)
@@ -107,32 +116,17 @@ private struct RecentActivity: View {
                 ForEach(history, id: \.txHash) { entry in
                     HistoryRow(entry: entry)
                 }
+                if totalCount > history.count {
+                    NavigationLink {
+                        HistoryView()
+                    } label: {
+                        Text("See all activity")
+                            .font(.callout)
+                    }
+                    .padding(.top, 4)
+                }
             }
         }
-    }
-}
-
-private struct HistoryRow: View {
-    let entry: AddressHistoryEntry
-
-    var body: some View {
-        HStack {
-            Image(systemName: roleIcon(entry.role))
-                .foregroundStyle(roleTint(entry.role))
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(roleLabel(entry.role))
-                    .font(.callout.weight(.medium))
-                Text("Height \(entry.height)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer()
-            Text(formatDelta(entry.deltaSatoshi))
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(entry.deltaSatoshi >= 0 ? .green : .primary)
-        }
-        .padding(.vertical, 6)
     }
 }
 
@@ -169,59 +163,18 @@ private struct ConnectionPill: View {
 }
 
 // MARK: - Formatters
+//
+// roleIcon / roleTint / roleLabel / formatDelta live in
+// HistoryView.swift — shared with the full activity list. Only
+// formatSatoshis stays here because BalanceCard is the only caller
+// (the activity row uses formatDelta which has its own +/- logic).
 
 private func formatSatoshis(_ sats: UInt64) -> String {
-    // Show as N sat for now; Phase 5b can add BTC/fiat toggles. The
-    // monospacedDigit on the label keeps wide numbers stable.
     let formatter = NumberFormatter()
     formatter.numberStyle = .decimal
     formatter.groupingSeparator = ","
     let n = formatter.string(from: NSNumber(value: sats)) ?? "\(sats)"
     return "\(n) sat"
-}
-
-private func formatDelta(_ delta: Int64) -> String {
-    let formatter = NumberFormatter()
-    formatter.numberStyle = .decimal
-    formatter.groupingSeparator = ","
-    formatter.positivePrefix = "+"
-    let n = formatter.string(from: NSNumber(value: delta)) ?? "\(delta)"
-    return n
-}
-
-private func roleIcon(_ role: HistoryRole) -> String {
-    switch role {
-    case .incoming: return "arrow.down.left.circle.fill"
-    case .outgoing: return "arrow.up.right.circle.fill"
-    case .self:     return "arrow.triangle.2.circlepath.circle.fill"
-    case .mint:     return "arrow.down.to.line.circle.fill"
-    case .burn:     return "arrow.up.to.line.circle.fill"
-    case .unknown:  return "questionmark.circle.fill"
-    }
-}
-
-private func roleTint(_ role: HistoryRole) -> Color {
-    switch role {
-    case .incoming: return .green
-    case .outgoing: return .orange
-    case .self:     return .blue
-    // Mint/burn pop in purple to distinguish bridge activity from
-    // pure-L2 transfers at a glance.
-    case .mint:     return .purple
-    case .burn:     return .purple
-    case .unknown:  return .gray
-    }
-}
-
-private func roleLabel(_ role: HistoryRole) -> String {
-    switch role {
-    case .incoming: return "Received"
-    case .outgoing: return "Sent"
-    case .self:     return "Self-send"
-    case .mint:     return "Minted"
-    case .burn:     return "Withdrawn"
-    case .unknown:  return "Unknown"
-    }
 }
 
 #Preview {

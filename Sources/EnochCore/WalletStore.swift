@@ -35,6 +35,14 @@ public final class WalletStore {
     public private(set) var utxoCount: Int = 0
     public private(set) var history: [AddressHistoryEntry] = []
     public private(set) var feeRates: FeeRates?
+    public private(set) var operatorInfo: OperatorInfo?
+
+    /// Convenience: the operator's flat per-tx L2 fee, or nil if
+    /// `/v1/info` hasn't been fetched yet. SendView reads this to
+    /// preview the fee before the user confirms.
+    public var feePerTxSatoshi: UInt64? {
+        operatorInfo?.feeSchedule?.perTxFeeSatoshi
+    }
 
     // MARK: - Connection state
 
@@ -123,26 +131,49 @@ public final class WalletStore {
         utxoCount = 0
         history = []
         feeRates = nil
+        operatorInfo = nil
         connectionState = .idle
+    }
+
+    /// Build, sign, and submit an L2 transfer to `recipient` for
+    /// `amount` sats. Triggers a biometric prompt at the moment of
+    /// signing (one prompt per input under the hood; for typical
+    /// 1-2 input txs that's 1-2 Face ID confirmations). Refreshes
+    /// state immediately on success so the UI doesn't have to wait
+    /// for the SSE round-trip.
+    public func send(to recipient: String, amount: UInt64, biometricPrompt: String) async throws {
+        let builder = TxBuilder(edge: client, keystore: keystore)
+        let tx = try await builder.buildSendTx(
+            recipient: recipient,
+            amountSatoshi: amount,
+            biometricPrompt: biometricPrompt
+        )
+        _ = try await client.submitTx(tx)
+        // SSE will deliver tx_applied for us, but a direct refresh
+        // here gets the new balance + history visible immediately
+        // — better UX than waiting on the round-trip event.
+        await refresh()
     }
 
     // MARK: - Refresh
 
-    /// Re-pull balance, address history, and fee rates concurrently.
-    /// Each network call is independent — partial failure (e.g. fee
-    /// oracle 502) doesn't take the rest down. Errors land on
-    /// `lastError` so the UI can surface a banner without panicking
-    /// the user.
+    /// Re-pull balance, address history, fee rates, and operator
+    /// info concurrently. Each network call is independent —
+    /// partial failure (e.g. fee oracle 502) doesn't take the rest
+    /// down. Errors land on `lastError` so the UI can surface a
+    /// banner without panicking the user.
     public func refresh() async {
         guard let address else { return }
 
         async let balResult = result { try await self.client.getBalance(address: address) }
         async let histResult = result { try await self.client.getAddressHistory(address: address) }
         async let feeResult = result { try await self.client.getFeeOracle() }
+        async let infoResult = result { try await self.client.getInfo() }
 
         let bal = await balResult
         let hist = await histResult
         let fee = await feeResult
+        let info = await infoResult
 
         if case .success(let b) = bal {
             self.balance = b.balanceSatoshi
@@ -156,6 +187,9 @@ public final class WalletStore {
         if case .success(let f) = fee {
             self.feeRates = f.ratesSatPerVB
         }
+        if case .success(let i) = info {
+            self.operatorInfo = i.operator
+        }
 
         // Surface the last failed call (if any) for the UI banner.
         // We can't put the heterogeneously-typed Results into a
@@ -163,6 +197,7 @@ public final class WalletStore {
         // them inline.
         if case .failure(let e) = bal  { lastError = e.localizedDescription }
         if case .failure(let e) = hist { lastError = e.localizedDescription }
+        if case .failure(let e) = info { lastError = e.localizedDescription }
         if case .failure(let e) = fee  { lastError = e.localizedDescription }
     }
 
