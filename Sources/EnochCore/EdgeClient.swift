@@ -92,6 +92,16 @@ public final class EdgeClient {
         try await get("/v1/fee_oracle")
     }
 
+    /// In-flight withdrawals — burns whose L1 tx hasn't been
+    /// broadcast yet. Wallet correlates against its address-history
+    /// burn rows (`burnTxHash` ↔ row's `txHash`) to render a
+    /// "Pending bridge confirmation" status badge until the
+    /// operator emits a `withdrawal_status` SSE event with
+    /// status = "broadcast".
+    public func getPendingWithdrawals() async throws -> PendingWithdrawalsResponse {
+        try await get("/v1/pending_withdrawals")
+    }
+
     // MARK: - POST /v1/submit_tx
 
     /// Submit a fully-signed `Tx`. The wallet builds + signs via

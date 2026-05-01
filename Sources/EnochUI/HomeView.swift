@@ -18,7 +18,8 @@ struct HomeView: View {
                 BalanceCard(balance: wallet.balance, utxoCount: wallet.utxoCount)
                 ActionRow()
                 RecentActivity(history: Array(wallet.history.prefix(5)),
-                               totalCount: wallet.history.count)
+                               totalCount: wallet.history.count,
+                               withdrawalStatuses: wallet.withdrawalStatuses)
             }
             .padding()
         }
@@ -99,6 +100,7 @@ private struct ActionButtonLabel: View {
 private struct RecentActivity: View {
     let history: [AddressHistoryEntry]
     let totalCount: Int
+    let withdrawalStatuses: [String: WalletStore.WithdrawalUIStatus]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -120,7 +122,8 @@ private struct RecentActivity: View {
                     .foregroundStyle(.tertiary)
             } else {
                 ForEach(history, id: \.txHash) { entry in
-                    HistoryRow(entry: entry)
+                    HistoryRow(entry: entry,
+                               withdrawalStatus: withdrawalStatuses[entry.txHash])
                 }
                 if totalCount > history.count {
                     NavigationLink {

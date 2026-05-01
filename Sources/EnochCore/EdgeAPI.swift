@@ -198,6 +198,38 @@ public struct FeeRates: Codable, Equatable {
     }
 }
 
+// MARK: - /v1/pending_withdrawals
+
+public struct PendingWithdrawalsResponse: Codable, Equatable {
+    public let withdrawals: [PendingWithdrawal]
+}
+
+/// One entry from /v1/pending_withdrawals. Wallets correlate
+/// against their address-history burn rows (matching `burnTxHash`
+/// to the row's `txHash`) to render a "still in flight" status
+/// for any withdrawal that hasn't been broadcast yet.
+///
+/// Once the operator broadcasts to L1, the entry leaves the
+/// pending list — the broadcast SSE event gives wallets the
+/// btc_txid and removes the "pending" indicator from history.
+public struct PendingWithdrawal: Codable, Equatable {
+    public let burnTxHash: String
+    public let amountSatoshi: UInt64
+    public let bitcoinAddress: String
+    public let burnHeight: UInt64
+    public let completed: Bool
+    public let round1QuorumL1Height: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case burnTxHash = "burn_tx_hash"
+        case amountSatoshi = "amount_satoshi"
+        case bitcoinAddress = "bitcoin_address"
+        case burnHeight = "burn_height"
+        case completed
+        case round1QuorumL1Height = "round1_quorum_l1_height"
+    }
+}
+
 // MARK: - POST /v1/submit_tx
 
 public struct SubmitTxResponse: Codable, Equatable {

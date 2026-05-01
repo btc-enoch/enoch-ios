@@ -23,6 +23,7 @@ public struct EdgeEvent: Equatable {
         case connected            // synthetic, emitted on each successful upstream connect
         case txApplied            // tx_applied
         case stateRootSigned      // state_root_signed
+        case withdrawalStatus     // withdrawal_status — peg-out lifecycle event
         case unknown
     }
     public let kind: Kind
@@ -33,6 +34,7 @@ public struct EdgeEvent: Equatable {
         switch eventName {
         case "tx_applied":         kind = .txApplied
         case "state_root_signed":  kind = .stateRootSigned
+        case "withdrawal_status":  kind = .withdrawalStatus
         default:                   kind = .unknown
         }
         return EdgeEvent(kind: kind, raw: data)
@@ -70,6 +72,30 @@ public struct StateRootSignedPayload: Codable, Equatable {
     }
 }
 
+/// Lifecycle event for an in-flight peg-out. The operator emits one
+/// at the moment a burn is queued and again at L1 broadcast (which
+/// is when `btcTxID` becomes available). Wallet correlates by
+/// `burnTxHash` ↔ the address-history row's tx_hash.
+///
+/// `status` is decoded as a String (not an enum) so unknown future
+/// values from a newer operator don't crash the wallet — UI just
+/// renders an unknown status as "Processing".
+public struct WithdrawalStatusPayload: Codable, Equatable {
+    public let burnTxHash: String
+    public let status: String
+    public let bitcoinAddress: String
+    public let amountSatoshi: UInt64
+    public let btcTxID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case burnTxHash = "burn_tx_hash"
+        case status
+        case bitcoinAddress = "bitcoin_address"
+        case amountSatoshi = "amount_satoshi"
+        case btcTxID = "btc_txid"
+    }
+}
+
 public extension EdgeEvent {
     /// Returns nil on shape mismatch — wallets typically `if let`
     /// rather than try/catch in event handling.
@@ -79,6 +105,10 @@ public extension EdgeEvent {
 
     func asStateRootSigned() -> StateRootSignedPayload? {
         try? JSONDecoder().decode(StateRootSignedPayload.self, from: raw)
+    }
+
+    func asWithdrawalStatus() -> WithdrawalStatusPayload? {
+        try? JSONDecoder().decode(WithdrawalStatusPayload.self, from: raw)
     }
 }
 

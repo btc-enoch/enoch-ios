@@ -23,7 +23,8 @@ struct HistoryView: View {
                 )
             } else {
                 List(wallet.history, id: \.txHash) { entry in
-                    HistoryRow(entry: entry)
+                    HistoryRow(entry: entry,
+                               withdrawalStatus: wallet.withdrawalStatuses[entry.txHash])
                 }
             }
         }
@@ -36,10 +37,12 @@ struct HistoryView: View {
 }
 
 /// Same layout as the home row but lifted into its own type so
-/// HomeView and HistoryView can share it. (HomeView's private
-/// `HistoryRow` will be removed in the same commit.)
+/// HomeView and HistoryView can share it. The optional
+/// `withdrawalStatus` is only meaningful for `.burn` rows — when
+/// present, the row gains a status badge under the height line.
 struct HistoryRow: View {
     let entry: AddressHistoryEntry
+    var withdrawalStatus: WalletStore.WithdrawalUIStatus? = nil
 
     var body: some View {
         HStack {
@@ -52,6 +55,9 @@ struct HistoryRow: View {
                 Text("Height \(entry.height)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                if entry.role == .burn, let status = withdrawalStatus {
+                    WithdrawalStatusBadge(status: status)
+                }
             }
             Spacer()
             Text(formatDelta(entry.deltaSatoshi))
@@ -59,6 +65,32 @@ struct HistoryRow: View {
                 .foregroundStyle(entry.deltaSatoshi >= 0 ? .green : .primary)
         }
         .padding(.vertical, 6)
+    }
+}
+
+/// Small inline label rendering the lifecycle state of a peg-out.
+/// Three concrete states (pending / broadcast / unknown) keep the
+/// vocabulary tight; the unknown bucket is forward-compat for
+/// future server states (e.g. confirmed once an L1 watcher lands).
+private struct WithdrawalStatusBadge: View {
+    let status: WalletStore.WithdrawalUIStatus
+
+    var body: some View {
+        switch status {
+        case .pending:
+            Label("Bridge processing…", systemImage: "hourglass")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        case .broadcast(let btcTxID):
+            Label("Bitcoin: \(btcTxID.prefix(10))…",
+                  systemImage: "bitcoinsign.circle")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .unknownState(let s):
+            Label(s, systemImage: "questionmark.circle")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

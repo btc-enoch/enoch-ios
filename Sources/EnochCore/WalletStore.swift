@@ -37,11 +37,30 @@ public final class WalletStore {
     public private(set) var feeRates: FeeRates?
     public private(set) var operatorInfo: OperatorInfo?
 
+    /// Per-burn lifecycle status, keyed by burn_tx_hash (matches the
+    /// tx_hash on history rows where role = .burn). Populated from
+    /// /v1/pending_withdrawals on refresh + updated from
+    /// withdrawal_status SSE events. Wallet UI looks up entries here
+    /// to render "Pending bridge confirmation" → "Sent to Bitcoin:
+    /// <txid>" badges on burn rows.
+    public private(set) var withdrawalStatuses: [String: WithdrawalUIStatus] = [:]
+
     /// Convenience: the operator's flat per-tx L2 fee, or nil if
     /// `/v1/info` hasn't been fetched yet. SendView reads this to
     /// preview the fee before the user confirms.
     public var feePerTxSatoshi: UInt64? {
         operatorInfo?.feeSchedule?.perTxFeeSatoshi
+    }
+
+    /// Wallet-facing lifecycle states. Mapped from the operator's
+    /// finer state machine; the wallet only needs three buckets to
+    /// render UX. Future server states (e.g. "confirmed" once an
+    /// L1 watcher lands) decode as `.unknownState` so older builds
+    /// keep rendering meaningfully.
+    public enum WithdrawalUIStatus: Equatable {
+        case pending                     // queued / awaiting challenge window
+        case broadcast(btcTxID: String)  // L1 tx out, not yet confirmed
+        case unknownState(String)        // forward-compat for future server states
     }
 
     // MARK: - Connection state
@@ -132,6 +151,7 @@ public final class WalletStore {
         history = []
         feeRates = nil
         operatorInfo = nil
+        withdrawalStatuses = [:]
         connectionState = .idle
     }
 
@@ -185,11 +205,13 @@ public final class WalletStore {
         async let histResult = result { try await self.client.getAddressHistory(address: address) }
         async let feeResult = result { try await self.client.getFeeOracle() }
         async let infoResult = result { try await self.client.getInfo() }
+        async let pendingResult = result { try await self.client.getPendingWithdrawals() }
 
         let bal = await balResult
         let hist = await histResult
         let fee = await feeResult
         let info = await infoResult
+        let pending = await pendingResult
 
         if case .success(let b) = bal {
             self.balance = b.balanceSatoshi
@@ -205,6 +227,17 @@ public final class WalletStore {
         }
         if case .success(let i) = info {
             self.operatorInfo = i.operator
+        }
+        if case .success(let p) = pending {
+            // Anything in /pending_withdrawals is still awaiting
+            // broadcast → mark as .pending unless we already saw
+            // its broadcast SSE event (don't clobber a .broadcast
+            // entry that arrived seconds before this refresh).
+            for w in p.withdrawals where w.completed == false {
+                if withdrawalStatuses[w.burnTxHash] == nil {
+                    withdrawalStatuses[w.burnTxHash] = .pending
+                }
+            }
         }
 
         // Surface the last failed call (if any) for the UI banner.
@@ -253,6 +286,25 @@ public final class WalletStore {
         case .stateRootSigned:
             // Future: feed light-client verification. No-op for now.
             break
+        case .withdrawalStatus:
+            // Update the per-burn status map so HistoryRow can show
+            // the up-to-date label without a refresh round-trip.
+            if let payload = event.asWithdrawalStatus() {
+                switch payload.status {
+                case "queued":
+                    withdrawalStatuses[payload.burnTxHash] = .pending
+                case "broadcast":
+                    if let id = payload.btcTxID, !id.isEmpty {
+                        withdrawalStatuses[payload.burnTxHash] = .broadcast(btcTxID: id)
+                    } else {
+                        // Operator told us "broadcast" without a txid —
+                        // shouldn't happen, but render gracefully.
+                        withdrawalStatuses[payload.burnTxHash] = .unknownState("broadcast")
+                    }
+                default:
+                    withdrawalStatuses[payload.burnTxHash] = .unknownState(payload.status)
+                }
+            }
         case .unknown:
             break
         }
