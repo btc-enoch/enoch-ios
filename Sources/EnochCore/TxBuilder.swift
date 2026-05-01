@@ -29,6 +29,7 @@ public enum TxBuilderError: Swift.Error {
     case scriptSigBuild(input: Int, underlying: Swift.Error)
     case fetchInfo(Swift.Error)
     case fetchUTXOs(Swift.Error)
+    case buildBurnOutput(Swift.Error)
 }
 
 public final class TxBuilder {
@@ -40,18 +41,74 @@ public final class TxBuilder {
         self.keystore = keystore
     }
 
-    /// Build, sign, and return a `Tx` that sends `amountSatoshi` to
+    /// Build, sign, and return a Tx that sends `amountSatoshi` to
     /// `recipient` (any address format) from the wallet's address.
     /// The returned tx is ready for `EdgeClient.submitTx`.
     ///
     /// Operator fee accounting: we read the per-tx fee from
-    /// `/v1/info` and emit a third output paying the fee pool. If
-    /// the surplus over recipient + fee is non-dust, a change output
-    /// returns to the wallet's own address; otherwise the dust is
-    /// rolled into the fee.
+    /// `/v1/info` and emit a separate output paying the fee pool.
+    /// If the surplus over recipient + fee is non-dust, a change
+    /// output returns to the wallet's own address; otherwise the
+    /// dust is rolled into the fee.
     public func buildSendTx(
         recipient: String,
         amountSatoshi: UInt64,
+        biometricPrompt: String
+    ) async throws -> Tx {
+        let pkh: Data
+        do {
+            pkh = try Address.decodeToPKH(recipient)
+        } catch {
+            throw TxBuilderError.decodeRecipient(error)
+        }
+        let recipientOutput = TxOutput(
+            amount: amountSatoshi,
+            scriptPubKey: try Script.p2pkhScriptPubKey(pkh: pkh)
+        )
+        return try await buildOutgoing(
+            recipientOutput: recipientOutput,
+            biometricPrompt: biometricPrompt
+        )
+    }
+
+    /// Build, sign, and return a Tx that initiates an L2 → L1
+    /// withdrawal (peg-out): the "recipient" output is an OP_RETURN
+    /// `ENOCH:WD:<bitcoinAddress>` burn marker. The bridge agents
+    /// pick it up after the L2 challenge window, 3-of-5 sign a
+    /// Bitcoin tx paying the L1 address from the bridge multisig,
+    /// and broadcast it. The user's L2 burn amount is the *gross*
+    /// payout — the bridge eats the L1 mining fee from its own
+    /// UTXOs, not from the user's burn.
+    ///
+    /// `bitcoinAddress` is passed through verbatim into the
+    /// OP_RETURN payload (length capped at 66 chars). The bridge
+    /// agents validate the address format on their end; the wallet
+    /// doesn't pre-decode because it doesn't need to.
+    public func buildWithdrawTx(
+        bitcoinAddress: String,
+        amountSatoshi: UInt64,
+        biometricPrompt: String
+    ) async throws -> Tx {
+        let burnScript: Data
+        do {
+            burnScript = try Script.opReturnBurn(bitcoinAddress: bitcoinAddress)
+        } catch {
+            throw TxBuilderError.buildBurnOutput(error)
+        }
+        let recipientOutput = TxOutput(amount: amountSatoshi, scriptPubKey: burnScript)
+        return try await buildOutgoing(
+            recipientOutput: recipientOutput,
+            biometricPrompt: biometricPrompt
+        )
+    }
+
+    /// Shared core of buildSendTx and buildWithdrawTx. Caller
+    /// provides the pre-built recipient output (a P2PKH for L2
+    /// sends, an OP_RETURN burn for L2 → L1 withdrawals); we handle
+    /// the rest: fetch operator info + UTXOs, run coin selection,
+    /// add fee + change outputs, sign every input.
+    private func buildOutgoing(
+        recipientOutput: TxOutput,
         biometricPrompt: String
     ) async throws -> Tx {
         guard let publicKey = try keystore.publicKey() else {
@@ -59,7 +116,7 @@ public final class TxBuilder {
         }
         let myAddress = try Address.encodeEnoch(publicKey: publicKey)
 
-        // Step 1 + 2: parallel fetch of operator info + UTXOs.
+        // Parallel fetch of operator info + UTXOs.
         async let infoTask = wrap(TxBuilderError.fetchInfo) {
             try await self.edge.getInfo()
         }
@@ -73,13 +130,6 @@ public final class TxBuilder {
             throw TxBuilderError.missingFeeSchedule
         }
 
-        // Step 3: addresses → pkhs.
-        let recipientPKH: Data
-        do {
-            recipientPKH = try Address.decodeToPKH(recipient)
-        } catch {
-            throw TxBuilderError.decodeRecipient(error)
-        }
         let feePoolPKH: Data
         do {
             feePoolPKH = try Address.decodeToPKH(info.operator.feePoolAddress)
@@ -87,21 +137,22 @@ public final class TxBuilder {
             throw TxBuilderError.decodeFeePool(error)
         }
 
-        // Step 4: coin selection.
+        // Coin selection: target is the recipient's amount; fee is
+        // the operator's flat per-tx fee.
         let selection: CoinSelection.Selection
         do {
             selection = try CoinSelection.select(
                 utxos: utxos.utxos,
-                target: amountSatoshi,
+                target: recipientOutput.amount,
                 feePerTx: feePerTx
             )
         } catch let e as CoinSelectionError {
             throw TxBuilderError.selectInputs(e)
         }
 
-        // Step 5: build unsigned tx.
+        // Build unsigned tx: recipient (caller-supplied) + fee + change.
         var outputs: [TxOutput] = [
-            TxOutput(amount: amountSatoshi, scriptPubKey: try Script.p2pkhScriptPubKey(pkh: recipientPKH)),
+            recipientOutput,
             TxOutput(amount: selection.feeSatoshi, scriptPubKey: try Script.p2pkhScriptPubKey(pkh: feePoolPKH)),
         ]
         if selection.changeSatoshi > 0 {
@@ -122,8 +173,9 @@ public final class TxBuilder {
         }
         var tx = Tx(version: 1, inputs: inputs, outputs: outputs, lockTime: 0)
 
-        // Step 6: sign each input. Each sighash uses the *prevScriptPubKey*
-        // of the spent UTXO — recovered from the UTXOWire we already have.
+        // Sign each input. Each sighash uses the prevScriptPubKey
+        // of the spent UTXO — recovered from the UTXOWire we
+        // already have.
         for i in 0..<tx.inputs.count {
             let prevScriptPubKey: Data
             do {

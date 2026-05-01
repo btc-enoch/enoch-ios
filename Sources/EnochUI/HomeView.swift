@@ -70,6 +70,12 @@ private struct ActionRow: View {
             } label: {
                 ActionButtonLabel(title: "Send", systemImage: "arrow.up.right")
             }
+            NavigationLink {
+                WithdrawView()
+            } label: {
+                ActionButtonLabel(title: "Withdraw",
+                                  systemImage: "arrow.up.right.diamond")
+            }
         }
     }
 }

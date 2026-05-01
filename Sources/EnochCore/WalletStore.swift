@@ -155,6 +155,22 @@ public final class WalletStore {
         await refresh()
     }
 
+    /// Build, sign, and submit a peg-out (L2 → L1 withdrawal). The
+    /// burn output marks `amount` sats for the bridge agents to
+    /// pay out at `bitcoinAddress`. L2 balance drops immediately;
+    /// L1 funds settle later, after the agents' challenge window
+    /// + 3-of-5 sign + L1 broadcast + L1 confirmations.
+    public func withdraw(to bitcoinAddress: String, amount: UInt64, biometricPrompt: String) async throws {
+        let builder = TxBuilder(edge: client, keystore: keystore)
+        let tx = try await builder.buildWithdrawTx(
+            bitcoinAddress: bitcoinAddress,
+            amountSatoshi: amount,
+            biometricPrompt: biometricPrompt
+        )
+        _ = try await client.submitTx(tx)
+        await refresh()
+    }
+
     // MARK: - Refresh
 
     /// Re-pull balance, address history, fee rates, and operator

@@ -15,6 +15,7 @@ public enum ScriptError: Swift.Error, Equatable {
     case wrongPKHLength(Int)
     case wrongCompressedPubKeyLength(Int)
     case sigPushTooLong(Int)
+    case burnPayloadTooLong(Int)
 }
 
 public enum Script {
@@ -35,6 +36,32 @@ public enum Script {
         out.append(contentsOf: [0x76, 0xA9, 0x14])
         out.append(pkh)
         out.append(contentsOf: [0x88, 0xAC])
+        return out
+    }
+
+    /// OP_RETURN withdrawal-burn output:
+    ///
+    ///   OP_RETURN <push N> "ENOCH:WD:<btc_addr>"
+    ///   0x6A     N        ...payload...
+    ///
+    /// The payload tags an L2-side burn for the bridge agents to
+    /// pick up; they 3-of-5-sign an L1 tx paying `bitcoinAddress`
+    /// from the bridge's P2SH multisig. Single-byte push form only
+    /// (matches the operator's parser) — payload must fit in ≤ 75
+    /// bytes, which leaves up to 66 chars for the address. Every
+    /// real Bitcoin address format fits comfortably (taproot at 62
+    /// chars is the longest).
+    public static func opReturnBurn(bitcoinAddress: String) throws -> Data {
+        let prefix = "ENOCH:WD:"
+        let payload = prefix + bitcoinAddress
+        let payloadBytes = Data(payload.utf8)
+        guard payloadBytes.count <= 75 else {
+            throw ScriptError.burnPayloadTooLong(payloadBytes.count)
+        }
+        var out = Data(capacity: 2 + payloadBytes.count)
+        out.append(0x6A) // OP_RETURN
+        out.append(UInt8(payloadBytes.count))
+        out.append(payloadBytes)
         return out
     }
 

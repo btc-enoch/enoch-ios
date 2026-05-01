@@ -182,16 +182,22 @@ final class TxBuilderTests: XCTestCase {
 
     /// Caller hasn't created a wallet → clear error rather than a
     /// nil-deref or empty-input crash.
-    func testNoWalletKeyFails() async {
+    func testNoWalletKeyFails() async throws {
         let keystore = InMemoryWalletKeystore()
+        // Valid syntactic recipient + edge stub so we get past
+        // address-decode and into the actual key check. Passing
+        // "enoch1" used to land here pre-refactor; post-refactor
+        // (recipient decoded before key lookup) we need a parseable
+        // address to make sure the key-missing path is what fires.
+        let recipient = try Address.encodeEnoch(pkh: Data(repeating: 0xAA, count: 20))
         let edge = makeStubbedEdge(
             utxos: [],
-            myAddress: "enoch1"
+            myAddress: "enoch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqljsyzs"
         )
         let builder = TxBuilder(edge: edge, keystore: keystore)
 
         do {
-            _ = try await builder.buildSendTx(recipient: "enoch1",
+            _ = try await builder.buildSendTx(recipient: recipient,
                                               amountSatoshi: 1,
                                               biometricPrompt: "test")
             XCTFail("expected throw")
@@ -228,6 +234,54 @@ final class TxBuilderTests: XCTestCase {
         } catch {
             XCTFail("wrong error: \(error)")
         }
+    }
+
+    /// Withdraw path: recipient output is OP_RETURN with the burn
+    /// payload, NOT a P2PKH script. The fee output and (optional)
+    /// change output stay P2PKH, and every input is signed
+    /// correctly. Catches a regression where the helper might use
+    /// the wrong output script construction.
+    func testBuildsWithdrawTxWithBurnOutput() async throws {
+        let keystore = InMemoryWalletKeystore()
+        let pub = try keystore.createKey()
+        let myAddress = try Address.encodeEnoch(publicKey: pub)
+        let myScriptPubKey = try Script.p2pkhScriptPubKey(pkh: Hashing.hash160(pub.compressedBytes))
+
+        let edge = makeStubbedEdge(
+            feePerTx: 250,
+            utxos: [(amount: 100_000, scriptPubKey: myScriptPubKey)],
+            myAddress: myAddress
+        )
+        let builder = TxBuilder(edge: edge, keystore: keystore)
+
+        let bitcoinAddr = "bcrt1qabcdefghijklmnopqrstuvwxyz0123456789"
+        let tx = try await builder.buildWithdrawTx(bitcoinAddress: bitcoinAddr,
+                                                   amountSatoshi: 50_000,
+                                                   biometricPrompt: "test")
+
+        XCTAssertEqual(tx.outputs.count, 3, "burn + fee + change")
+
+        // Output 0 must be the OP_RETURN burn — first byte 0x6a, the
+        // payload after the push length must equal "ENOCH:WD:<addr>".
+        let burn = tx.outputs[0].scriptPubKey
+        XCTAssertEqual(burn.first, 0x6A, "first byte of burn output is OP_RETURN")
+        let pushLen = Int(burn[1])
+        let payload = String(data: burn.subdata(in: 2..<(2 + pushLen)), encoding: .utf8)
+        XCTAssertEqual(payload, "ENOCH:WD:" + bitcoinAddr)
+        XCTAssertEqual(tx.outputs[0].amount, 50_000)
+
+        // Output 1 = fee pool P2PKH.
+        XCTAssertEqual(tx.outputs[1].amount, 250)
+        XCTAssertEqual(tx.outputs[1].scriptPubKey.first, 0x76,
+                       "fee output is still standard P2PKH")
+
+        // Signature on the input verifies — proves we sign over a
+        // tx whose first output is the burn (the operator's verifier
+        // will be hashing the same bytes).
+        let digest = try tx.sighashLegacyAll(inputIndex: 0, prevScriptPubKey: myScriptPubKey)
+        let (sigBytes, _) = try parseScriptSig(tx.inputs[0].scriptSig)
+        let sig = Secp256k1.Signature(der: Data(sigBytes.dropLast()))
+        XCTAssertTrue(pub.verifyDigest(digest, signature: sig))
     }
 }
 
