@@ -147,13 +147,17 @@ public struct AddressHistoryEntry: Codable, Equatable {
 }
 
 /// Operator-side role labels. "self" = both incoming and outgoing
-/// (a self-send / change). Decoded as String first so an unexpected
-/// value (e.g. a future role we don't know) becomes `.unknown`
-/// rather than a hard decode failure.
+/// (a self-send / change). "mint" tags a bridge peg-in; "burn" tags
+/// a tx that contains an `OP_RETURN ENOCH:WD:` peg-out output.
+/// Decoded as String first so an unexpected value (e.g. a future
+/// role we don't know) becomes `.unknown` rather than a hard decode
+/// failure.
 public enum HistoryRole: String, Codable, Equatable {
     case incoming
     case outgoing
     case `self`
+    case mint
+    case burn
     case unknown
 
     public init(from decoder: Decoder) throws {

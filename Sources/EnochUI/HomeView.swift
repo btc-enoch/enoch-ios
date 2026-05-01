@@ -194,6 +194,8 @@ private func roleIcon(_ role: HistoryRole) -> String {
     case .incoming: return "arrow.down.left.circle.fill"
     case .outgoing: return "arrow.up.right.circle.fill"
     case .self:     return "arrow.triangle.2.circlepath.circle.fill"
+    case .mint:     return "arrow.down.to.line.circle.fill"
+    case .burn:     return "arrow.up.to.line.circle.fill"
     case .unknown:  return "questionmark.circle.fill"
     }
 }
@@ -203,6 +205,10 @@ private func roleTint(_ role: HistoryRole) -> Color {
     case .incoming: return .green
     case .outgoing: return .orange
     case .self:     return .blue
+    // Mint/burn pop in purple to distinguish bridge activity from
+    // pure-L2 transfers at a glance.
+    case .mint:     return .purple
+    case .burn:     return .purple
     case .unknown:  return .gray
     }
 }
@@ -212,6 +218,8 @@ private func roleLabel(_ role: HistoryRole) -> String {
     case .incoming: return "Received"
     case .outgoing: return "Sent"
     case .self:     return "Self-send"
+    case .mint:     return "Minted"
+    case .burn:     return "Withdrawn"
     case .unknown:  return "Unknown"
     }
 }

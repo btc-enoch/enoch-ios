@@ -88,6 +88,22 @@ final class EdgeClientTests: XCTestCase {
         XCTAssertEqual(h.entries[0].role, .unknown)
     }
 
+    /// Bridge-tagged wire roles. "mint" = peg-in; "burn" = peg-out.
+    /// Wallet UIs should label these "Minted" / "Withdrawn" rather
+    /// than the generic "Received" / "Sent".
+    func testHistoryRoleBridgeDecoders() async throws {
+        let json = #"""
+        {"address":"enoch1x","entries":[
+          {"tx_hash":"aa","height":1,"role":"mint","delta_satoshi":100000},
+          {"tx_hash":"bb","height":2,"role":"burn","delta_satoshi":-50000}
+        ]}
+        """#
+        let client = makeClient { _ in (200, jsonBody(json)) }
+        let h = try await client.getAddressHistory(address: "enoch1x")
+        XCTAssertEqual(h.entries[0].role, .mint)
+        XCTAssertEqual(h.entries[1].role, .burn)
+    }
+
     func testSubmitTxPostsBodyAndDecodesResponse() async throws {
         let respJSON = #"{"status":"ok","tx_hash":"deadbeef","burns":0}"#
         let client = makeClient { req in
