@@ -167,8 +167,8 @@ final class EdgeClientTests: XCTestCase {
 
     // MARK: - fixtures
 
-    private func makeFixtureTx() -> Transaction {
-        Transaction(
+    private func makeFixtureTx() -> Tx {
+        Tx(
             version: 1,
             inputs: [
                 TxInput(

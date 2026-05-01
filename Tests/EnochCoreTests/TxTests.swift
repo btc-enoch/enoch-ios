@@ -1,7 +1,7 @@
 import XCTest
 @testable import EnochCore
 
-final class TransactionTests: XCTestCase {
+final class TxTests: XCTestCase {
     // MARK: - varint encoding
 
     /// Boundary values for Bitcoin's compact-int encoding. A bug here
@@ -76,7 +76,7 @@ final class TransactionTests: XCTestCase {
         let scriptSig = Data([0xAA, 0xBB])
         let scriptPubKey = Data([0xCC, 0xDD, 0xEE])
 
-        let tx = Transaction(
+        let tx = Tx(
             version: 1,
             inputs: [TxInput(txHash: txHashDisplay, vout: 0, scriptSig: scriptSig, sequence: 0xFFFFFFFF)],
             outputs: [TxOutput(amount: 1000, scriptPubKey: scriptPubKey)],
@@ -102,14 +102,14 @@ final class TransactionTests: XCTestCase {
     }
 
     func testWireBytesRejectsWrongTxHashLength() {
-        let tx = Transaction(
+        let tx = Tx(
             version: 1,
             inputs: [TxInput(txHash: Data(repeating: 0, count: 31), vout: 0)],
             outputs: [TxOutput(amount: 1, scriptPubKey: Data([0x00]))],
             lockTime: 0
         )
         XCTAssertThrowsError(try tx.wireBytes()) { err in
-            guard case TransactionError.wrongTxHashLength(let i, let n) = err else {
+            guard case TxError.wrongTxHashLength(let i, let n) = err else {
                 return XCTFail("unexpected error: \(err)")
             }
             XCTAssertEqual(i, 0)
@@ -181,7 +181,7 @@ final class TransactionTests: XCTestCase {
     func testSighashOutOfRangeInputRejected() {
         let tx = makeFixtureTx()
         XCTAssertThrowsError(try tx.sighashLegacyAll(inputIndex: 99, prevScriptPubKey: Data())) { err in
-            guard case TransactionError.inputIndexOutOfRange(let i) = err else {
+            guard case TxError.inputIndexOutOfRange(let i) = err else {
                 return XCTFail("unexpected error: \(err)")
             }
             XCTAssertEqual(i, 99)
@@ -190,14 +190,14 @@ final class TransactionTests: XCTestCase {
 
     // MARK: - JSON wire round-trip
 
-    /// Submit a tx → JSON → submit object back to a domain Transaction.
+    /// Submit a tx → JSON → submit object back to a domain Tx.
     /// Must be byte-stable: txHash before and after a round-trip equal.
     func testJSONRoundTrip() throws {
         let original = makeFixtureTx()
         let wire = original.toWire()
         let encoded = try JSONEncoder().encode(wire)
         let decoded = try JSONDecoder().decode(SubmitTxRequest.self, from: encoded)
-        let recovered = try Transaction(wire: decoded)
+        let recovered = try Tx(wire: decoded)
         XCTAssertEqual(try original.txHash(), try recovered.txHash())
     }
 
@@ -245,15 +245,15 @@ final class TransactionTests: XCTestCase {
         """.data(using: .utf8)!
 
         let wire = try JSONDecoder().decode(SubmitTxRequest.self, from: json)
-        let tx = try Transaction(wire: wire)
+        let tx = try Tx(wire: wire)
         let computed = try tx.txHash().hexString
         XCTAssertEqual(computed, "f3e52ffbfd442383fd266e126d4678aae60c2c2cfa9d903323c5a60fecb7f569")
     }
 
     // MARK: - fixtures
 
-    private func makeFixtureTx() -> Transaction {
-        Transaction(
+    private func makeFixtureTx() -> Tx {
+        Tx(
             version: 1,
             inputs: [
                 TxInput(
@@ -273,8 +273,8 @@ final class TransactionTests: XCTestCase {
         )
     }
 
-    private func makeTwoInputTx() -> Transaction {
-        Transaction(
+    private func makeTwoInputTx() -> Tx {
+        Tx(
             version: 1,
             inputs: [
                 TxInput(txHash: Data((0..<32).map { UInt8($0) }), vout: 0),

@@ -1,19 +1,21 @@
-// Transaction — Swift mirror of operator/ledger.Transaction.
+// Tx — Swift mirror of operator/ledger.Transaction.
 //
-// Two layers:
-//   - Domain types (this file): Data fields, type-safe; what the
-//     wallet builds, hashes, and signs against.
-//   - Wire types (TransactionWire.swift): Codable, hex strings;
-//     what `POST /v1/submit_tx` accepts.
+// One file per conceptual component: the type, its Bitcoin canonical
+// serialization, the legacy P2PKH SIGHASH_ALL sighash, and the JSON
+// wire shape `POST /v1/submit_tx` accepts. Keeping them together
+// makes the domain↔wire boundary obvious in one place — the type
+// names line up with TxInput / TxOutput / TxBuilder elsewhere in
+// the module.
 //
-// Wire serialization (Bitcoin canonical format, mirrors operator's
-// WireBytes) plus the legacy P2PKH SIGHASH_ALL sighash live here.
-// Both must be byte-exact with the operator side — a one-bit drift
-// in either produces signatures that look valid but verify to false.
+// Wire serialization mirrors operator/ledger/script.go::WireBytes
+// byte-for-byte. A one-bit drift here produces signatures that look
+// valid but verify to false.
 
 import Foundation
 
-public struct Transaction: Equatable {
+// MARK: - Domain types
+
+public struct Tx: Equatable {
     public var version: UInt32
     public var inputs: [TxInput]
     public var outputs: [TxOutput]
@@ -54,12 +56,14 @@ public struct TxOutput: Equatable {
     }
 }
 
-public enum TransactionError: Swift.Error, Equatable {
+public enum TxError: Swift.Error, Equatable {
     case wrongTxHashLength(input: Int, length: Int)
     case inputIndexOutOfRange(Int)
 }
 
-public extension Transaction {
+// MARK: - Serialization, hashing, sighash
+
+public extension Tx {
     /// Bitcoin canonical wire serialization. Format:
     ///
     ///   [4]    version (LE uint32)
@@ -76,8 +80,6 @@ public extension Transaction {
     ///     varint scriptPubKey length
     ///     [..]   scriptPubKey
     ///   [4]    lockTime (LE uint32)
-    ///
-    /// Mirrors operator/ledger/script.go::WireBytes byte for byte.
     func wireBytes() throws -> Data {
         var out = Data()
         out.appendUInt32LE(version)
@@ -85,7 +87,7 @@ public extension Transaction {
         out.appendVarInt(UInt64(inputs.count))
         for (i, input) in inputs.enumerated() {
             guard input.txHash.count == 32 else {
-                throw TransactionError.wrongTxHashLength(input: i, length: input.txHash.count)
+                throw TxError.wrongTxHashLength(input: i, length: input.txHash.count)
             }
             // Reverse display order → wire order.
             out.append(contentsOf: input.txHash.reversed())
@@ -136,7 +138,7 @@ public extension Transaction {
     /// wallet gets it from `/v1/utxos/{addr}` before signing.
     func sighashLegacyAll(inputIndex: Int, prevScriptPubKey: Data) throws -> Data {
         guard inputs.indices.contains(inputIndex) else {
-            throw TransactionError.inputIndexOutOfRange(inputIndex)
+            throw TxError.inputIndexOutOfRange(inputIndex)
         }
         var modified = self
         modified.inputs = inputs.enumerated().map { (i, input) in
@@ -147,6 +149,153 @@ public extension Transaction {
         // SIGHASH_ALL = 0x01, expressed as 4-byte LE = 01 00 00 00.
         serialized.appendUInt32LE(0x00000001)
         return Hashing.hash256(serialized)
+    }
+}
+
+// MARK: - JSON wire shape (POST /v1/submit_tx)
+
+/// JSON body for `POST /v1/submit_tx`. Fields mirror the operator's
+/// submitTxRequestJSON; binary fields are lowercase hex strings;
+/// `tx_hash` is in display order.
+public struct SubmitTxRequest: Codable, Equatable {
+    public var version: UInt32
+    public var inputs: [TxInputWire]
+    public var outputs: [TxOutputWire]
+    public var lockTime: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case inputs
+        case outputs
+        case lockTime = "lock_time"
+    }
+}
+
+public struct TxInputWire: Codable, Equatable {
+    public var txHash: String
+    public var vout: UInt32
+    public var scriptSig: String
+    public var sequence: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case txHash = "tx_hash"
+        case vout
+        case scriptSig = "script_sig"
+        case sequence
+    }
+}
+
+public struct TxOutputWire: Codable, Equatable {
+    public var amount: UInt64
+    public var scriptPubKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case amount
+        case scriptPubKey = "script_pubkey"
+    }
+}
+
+// MARK: - Domain ↔ wire bridges
+
+public extension Tx {
+    /// Convert to the JSON wire shape POST /v1/submit_tx accepts.
+    func toWire() -> SubmitTxRequest {
+        SubmitTxRequest(
+            version: version,
+            inputs: inputs.map {
+                TxInputWire(
+                    txHash: $0.txHash.hexString,
+                    vout: $0.vout,
+                    scriptSig: $0.scriptSig.hexString,
+                    sequence: $0.sequence
+                )
+            },
+            outputs: outputs.map {
+                TxOutputWire(
+                    amount: $0.amount,
+                    scriptPubKey: $0.scriptPubKey.hexString
+                )
+            },
+            lockTime: lockTime
+        )
+    }
+
+    /// Decode an inbound wire shape (e.g. when replaying a tx body
+    /// stored in operator tx-history).
+    init(wire req: SubmitTxRequest) throws {
+        self.version = req.version
+        self.lockTime = req.lockTime
+        self.inputs = try req.inputs.map {
+            TxInput(
+                txHash: try Data(hex: $0.txHash),
+                vout: $0.vout,
+                scriptSig: try Data(hex: $0.scriptSig),
+                sequence: $0.sequence
+            )
+        }
+        self.outputs = try req.outputs.map {
+            TxOutput(
+                amount: $0.amount,
+                scriptPubKey: try Data(hex: $0.scriptPubKey)
+            )
+        }
+    }
+}
+
+// MARK: - Hex helpers
+
+public enum HexError: Swift.Error, Equatable {
+    case oddLength
+    case nonHexCharacter(Character)
+}
+
+public extension Data {
+    /// Lowercase hex string — what the operator emits and accepts.
+    var hexString: String {
+        var s = String()
+        s.reserveCapacity(count * 2)
+        for byte in self {
+            s.append(hexNibble(byte >> 4))
+            s.append(hexNibble(byte & 0x0F))
+        }
+        return s
+    }
+
+    /// Decode a hex string. Empty string is the empty `Data`. Odd
+    /// length and non-hex characters surface as `HexError` rather
+    /// than producing silently-truncated bytes.
+    init(hex: String) throws {
+        if hex.isEmpty {
+            self = Data()
+            return
+        }
+        guard hex.count % 2 == 0 else { throw HexError.oddLength }
+        var out = Data(capacity: hex.count / 2)
+        var iter = hex.makeIterator()
+        while let hi = iter.next(), let lo = iter.next() {
+            guard let h = nibbleValue(hi), let l = nibbleValue(lo) else {
+                throw HexError.nonHexCharacter(hi)
+            }
+            out.append((h << 4) | l)
+        }
+        self = out
+    }
+}
+
+private func hexNibble(_ v: UInt8) -> Character {
+    let digits: [Character] = [
+        "0", "1", "2", "3", "4", "5", "6", "7",
+        "8", "9", "a", "b", "c", "d", "e", "f",
+    ]
+    return digits[Int(v & 0x0F)]
+}
+
+private func nibbleValue(_ c: Character) -> UInt8? {
+    switch c {
+    case "0"..."9": return UInt8(c.asciiValue! - Character("0").asciiValue!)
+    case "a"..."f": return UInt8(c.asciiValue! - Character("a").asciiValue! + 10)
+    case "A"..."F": return UInt8(c.asciiValue! - Character("A").asciiValue! + 10)
+    default: return nil
     }
 }
 

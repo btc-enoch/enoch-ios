@@ -5,7 +5,7 @@
 // Submodules (filled out incrementally):
 //   - Bech32        encode/decode for enoch1... and bc1q.../tb1q.../bcrt1q...
 //   - Secp256k1     wraps swift-secp256k1 with the operator's sighash + low-s rules
-//   - Transaction   wire types matching submitTxRequestJSON on the operator side
+//   - Tx            wire types matching submitTxRequestJSON on the operator side
 //   - Sighash       double-SHA256 over the canonical-form tx (scriptSigs zeroed)
 //   - EdgeClient    typed HTTP/SSE client against enoch-edge /v1/*
 //

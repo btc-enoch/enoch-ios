@@ -94,12 +94,12 @@ public final class EdgeClient {
 
     // MARK: - POST /v1/submit_tx
 
-    /// Submit a fully-signed `Transaction`. The wallet builds + signs
-    /// via `Transaction.sighashLegacyAll(...)` + `Secp256k1.PrivateKey
-    /// .signDigest(...)`, then hands the result here. Operator's reject
-    /// reasons surface as `.http(statusCode: 422, body: "insufficient
-    /// funds")` etc.
-    public func submitTx(_ tx: Transaction) async throws -> SubmitTxResponse {
+    /// Submit a fully-signed `Tx`. The wallet builds + signs via
+    /// `Tx.sighashLegacyAll(...)` + `Secp256k1.PrivateKey
+    /// .signDigest(...)`, then hands the result here. Operator's
+    /// reject reasons surface as `.http(statusCode: 422, body:
+    /// "insufficient funds")` etc.
+    public func submitTx(_ tx: Tx) async throws -> SubmitTxResponse {
         let body = try encoder.encode(tx.toWire())
         return try await post("/v1/submit_tx", body: body)
     }
