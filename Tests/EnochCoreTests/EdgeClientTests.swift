@@ -38,7 +38,7 @@ final class EdgeClientTests: XCTestCase {
             "watchtower_pool_address": "enoch1...",
             "reserve_address": "enoch1...",
             "bridge_deposit_address": "2NA...",
-            "withdrawal_challenge_window": 100,
+            "withdrawal_challenge_window_l1_blocks": 100,
             "current_height": 9
           }
         }

@@ -41,7 +41,7 @@ public struct OperatorInfo: Codable, Equatable {
     public let reserveAddress: String
     public let bridgeDepositAddress: String
     public let agentPayoutAddresses: [String]?
-    public let withdrawalChallengeWindow: UInt64
+    public let withdrawalChallengeWindowL1Blocks: UInt64
     public let currentHeight: UInt64
     public let feeSchedule: FeeSchedule?
 
@@ -56,7 +56,7 @@ public struct OperatorInfo: Codable, Equatable {
         case reserveAddress = "reserve_address"
         case bridgeDepositAddress = "bridge_deposit_address"
         case agentPayoutAddresses = "agent_payout_addresses"
-        case withdrawalChallengeWindow = "withdrawal_challenge_window"
+        case withdrawalChallengeWindowL1Blocks = "withdrawal_challenge_window_l1_blocks"
         case currentHeight = "current_height"
         case feeSchedule = "fee_schedule"
     }
