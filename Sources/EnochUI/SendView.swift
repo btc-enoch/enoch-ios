@@ -106,10 +106,19 @@ struct SendView: View {
         let trimmed = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         do {
-            _ = try Address.decodeToPKH(trimmed)
-            return nil
+            switch try Address.decode(trimmed) {
+            case .p2pkh, .p2tr:
+                // Both L2 forms — legacy enoch1... and post-#109
+                // enoch1p... — are valid Send recipients.
+                return nil
+            case .p2wpkh:
+                // Bitcoin segwit v0 isn't an L2 address. The wallet's
+                // Withdraw flow (peg-out) takes Bitcoin addresses; tell
+                // the user where to go instead of just rejecting.
+                return "That's a Bitcoin address. Use Withdraw to peg out to L1."
+            }
         } catch {
-            return "Not a valid Enoch or Bitcoin segwit-v0 address."
+            return "Not a valid Enoch address."
         }
     }
 
