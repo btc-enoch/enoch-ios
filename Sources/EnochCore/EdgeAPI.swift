@@ -40,6 +40,12 @@ public struct OperatorInfo: Codable, Equatable {
     public let watchtowerPoolAddress: String
     public let reserveAddress: String
     public let bridgeDepositAddress: String
+    /// Hex-encoded 3-of-5 P2SH multisig redeem script. Used by #108 to
+    /// derive each user's per-user Taproot deposit address client-side
+    /// (P2TR with NUMS internal pubkey + tap-leaf carrying this script
+    /// + a per-user salt). Optional in the wire shape so older
+    /// operators without #108 still decode cleanly.
+    public let bridgeRedeemScript: String?
     public let agentPayoutAddresses: [String]?
     public let withdrawalChallengeWindowL1Blocks: UInt64
     public let currentHeight: UInt64
@@ -55,6 +61,7 @@ public struct OperatorInfo: Codable, Equatable {
         case watchtowerPoolAddress = "watchtower_pool_address"
         case reserveAddress = "reserve_address"
         case bridgeDepositAddress = "bridge_deposit_address"
+        case bridgeRedeemScript = "bridge_redeem_script"
         case agentPayoutAddresses = "agent_payout_addresses"
         case withdrawalChallengeWindowL1Blocks = "withdrawal_challenge_window_l1_blocks"
         case currentHeight = "current_height"

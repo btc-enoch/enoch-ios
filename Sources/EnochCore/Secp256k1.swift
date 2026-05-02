@@ -300,19 +300,37 @@ public extension Secp256k1.PublicKey {
     func taprootOutputKey() throws -> Secp256k1.XOnlyPublicKey {
         let internalXOnly = try Secp256k1.XOnlyPublicKey.from(compressed: compressedBytes)
         let tweak = try Secp256k1.taprootKeypathTweak(internalXOnly: internalXOnly.bytes)
+        return try Secp256k1.applyTaprootTweak(internalXOnly: internalXOnly.bytes, tweak: tweak)
+    }
+}
+
+public extension Secp256k1 {
+    /// Apply a BIP-341 tap-tweak to an x-only internal pubkey,
+    /// returning the tweaked x-only output key. Shared primitive
+    /// used by both the keypath path (where the tweak is just
+    /// `tagged_hash("TapTweak", internal_xonly)`) and the script-path
+    /// path (where the tweak is
+    /// `tagged_hash("TapTweak", internal_xonly || merkle_root)`).
+    ///
+    /// Caller is responsible for computing the right tweak — this
+    /// function just applies it to the curve. Per BIP-340's
+    /// implicit-even-Y convention, we pass keyParity: 0 so libsecp
+    /// lifts the internal pubkey to its even-Y branch before adding.
+    static func applyTaprootTweak(
+        internalXOnly: Data,
+        tweak: Data
+    ) throws -> XOnlyPublicKey {
         do {
-            // keyParity: 0 selects the even-Y lift, matching BIP-340's
-            // "implicit even Y" convention. The Schnorr+Tweak helper
-            // verifies tweak consistency internally, so a wrong-parity
-            // call would surface as a thrown error rather than a
-            // silently-mis-tweaked output key.
-            let xonly = P256K.Schnorr.XonlyKey(dataRepresentation: internalXOnly.bytes, keyParity: 0)
+            let xonly = P256K.Schnorr.XonlyKey(
+                dataRepresentation: internalXOnly,
+                keyParity: 0
+            )
             let tweaked = try xonly.add([UInt8](tweak))
-            return try Secp256k1.XOnlyPublicKey(bytes: Data(tweaked.bytes))
+            return try XOnlyPublicKey(bytes: Data(tweaked.bytes))
         } catch let e as secp256k1Error {
-            throw Secp256k1.Error.invalidPublicKey(e)
+            throw Error.invalidPublicKey(e)
         } catch {
-            throw Secp256k1.Error.invalidPublicKey(error)
+            throw Error.invalidPublicKey(error)
         }
     }
 }
