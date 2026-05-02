@@ -61,6 +61,37 @@ public final class WalletStore {
         operatorInfo?.feeSchedule?.perTxFeeSatoshi
     }
 
+    /// The wallet's per-user L1 Bitcoin deposit address (#108) — a
+    /// bech32m P2TR derived from the wallet's L2 x-only pubkey + the
+    /// bridge redeem script under the operator's network. nil when
+    /// the wallet isn't loaded yet, when `/v1/info` hasn't been
+    /// fetched, when the operator predates #108 (no
+    /// `bridge_redeem_script`), or when the wallet's L2 address is
+    /// legacy P2PKH (no per-user Taproot deposit address is defined
+    /// for those). Wallets pay the same address every time — it's
+    /// fully deterministic from the L2 identity, not a HD path —
+    /// which keeps the QR + clipboard story simple and makes
+    /// pre-printing the address (e.g. on a paper backup) safe.
+    public var bridgeDepositAddress: String? {
+        guard
+            let l2Address = address,
+            let info = operatorInfo,
+            let redeem = info.bridgeRedeemScript,
+            let network = DepositAddress.Network(infoNetwork: info.network)
+        else { return nil }
+        guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
+            // Pre-#109 P2PKH addresses don't have a per-user deposit
+            // address; older wallets fall back to the shared
+            // bridge-deposit address with an OP_RETURN tag.
+            return nil
+        }
+        return try? DepositAddress.derive(
+            l2XOnly: outputKey,
+            bridgeRedeemScriptHex: redeem,
+            network: network
+        )
+    }
+
     /// Wallet-facing lifecycle states. Mapped from the operator's
     /// finer state machine; the wallet only needs three buckets to
     /// render UX. Future server states (e.g. "confirmed" once an
