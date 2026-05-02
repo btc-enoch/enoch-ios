@@ -27,6 +27,8 @@ public enum Secp256k1 {
         case invalidSignature(Swift.Error)
         case invalidPublicKey(Swift.Error)
         case keyGen(Swift.Error)
+        case invalidSchnorrSignatureLength(Int)
+        case invalidXOnlyPublicKeyLength(Int)
     }
 
     /// Bitcoin's standard sighash type byte appended to scriptSig
@@ -148,4 +150,101 @@ public enum Secp256k1 {
             return out
         }
     }
+
+    // MARK: - Schnorr (BIP-340) — used by L2 P2TR keypath spends post-#109
+
+    /// 64-byte BIP-340 Schnorr signature: `R.x || s`. Wire-stable;
+    /// matches the witness layout for P2TR keypath spends (single
+    /// element, no sighash byte under SIGHASH_DEFAULT).
+    public struct SchnorrSignature: Equatable {
+        public let bytes: Data
+
+        public init(bytes: Data) throws {
+            guard bytes.count == 64 else {
+                throw Error.invalidSchnorrSignatureLength(bytes.count)
+            }
+            self.bytes = bytes
+        }
+    }
+
+    /// 32-byte x-only public key (BIP-340). The Y coordinate is
+    /// implicitly the even one. Schnorr signatures verify against
+    /// this form, not against the 33-byte compressed form.
+    public struct XOnlyPublicKey: Equatable {
+        public let bytes: Data
+
+        public init(bytes: Data) throws {
+            guard bytes.count == 32 else {
+                throw Error.invalidXOnlyPublicKeyLength(bytes.count)
+            }
+            self.bytes = bytes
+        }
+
+        /// Derive an x-only key from a compressed (33-byte) pubkey by
+        /// dropping the parity prefix. Note the resulting x-only key
+        /// has a "natural" parity that's lost in the encoding;
+        /// callers that need that parity (BIP-341 tweak applied to
+        /// the private key) should track it separately via the full
+        /// `Secp256k1.PublicKey`.
+        public static func from(compressed: Data) throws -> XOnlyPublicKey {
+            guard compressed.count == 33 else {
+                throw Error.invalidXOnlyPublicKeyLength(compressed.count)
+            }
+            return try XOnlyPublicKey(bytes: compressed.subdata(in: 1..<33))
+        }
+    }
+
+    /// Sign a precomputed 32-byte digest (BIP-341 tap-script or
+    /// keypath sighash) using BIP-340 Schnorr. The returned 64-byte
+    /// signature is what gets pushed as the single-element witness
+    /// for a P2TR keypath spend under SIGHASH_DEFAULT.
+    ///
+    /// CRITICAL: pass the sighash directly. Same digest-vs-data
+    /// caveat as `signDigest` — we route through the `Digest`
+    /// overload so the bytes are signed as-is, not re-hashed.
+    ///
+    /// `privKey` is signed *as-is* — for BIP-341 keypath spends the
+    /// caller is responsible for producing the **tweaked** private
+    /// key (priv + H_TapTweak(pubkey) mod n, with parity-flip if the
+    /// internal pubkey has odd Y). The tweaking helper lives in a
+    /// separate file (Schnorr+Tweak from swift-secp256k1) and will
+    /// be wrapped in a follow-up commit.
+    public static func schnorrSign(digest: Data, privKey: PrivateKey) throws -> SchnorrSignature {
+        guard digest.count == 32 else {
+            throw Error.invalidDigestLength(digest.count)
+        }
+        do {
+            // P256K's Schnorr.PrivateKey takes raw 32-byte private
+            // scalar. Reuse our existing PrivateKey's rawBytes.
+            let schnorrKey = try P256K.Schnorr.PrivateKey(dataRepresentation: privKey.rawBytes)
+            let hd = HashDigest([UInt8](digest))
+            let sig = try schnorrKey.signature(for: hd)
+            return try SchnorrSignature(bytes: sig.dataRepresentation)
+        } catch let e as secp256k1Error {
+            throw Error.invalidSignature(e)
+        } catch {
+            throw Error.invalidSignature(error)
+        }
+    }
+
+    /// Verify a 64-byte Schnorr signature against an x-only pubkey
+    /// over a precomputed 32-byte digest. Returns false on any
+    /// malformed input (no thrown error — verifiers want a single
+    /// boolean).
+    public static func schnorrVerify(
+        signature: SchnorrSignature,
+        digest: Data,
+        publicKey: XOnlyPublicKey
+    ) -> Bool {
+        guard digest.count == 32 else { return false }
+        do {
+            let xonly = P256K.Schnorr.XonlyKey(dataRepresentation: publicKey.bytes, keyParity: 0)
+            let sig = try P256K.Schnorr.SchnorrSignature(dataRepresentation: signature.bytes)
+            let hd = HashDigest([UInt8](digest))
+            return xonly.isValidSignature(sig, for: hd)
+        } catch {
+            return false
+        }
+    }
 }
+

@@ -98,4 +98,82 @@ final class Secp256k1Tests: XCTestCase {
             XCTAssertEqual(n, 31)
         }
     }
+
+    // MARK: - Schnorr (BIP-340) — used by L2 P2TR keypath spends post-#109
+
+    /// Round-trip: sign a 32-byte digest with the wallet's privkey,
+    /// verify the resulting 64-byte Schnorr signature against the
+    /// derived x-only pubkey.
+    func testSchnorrSignVerifyRoundTrip() throws {
+        let priv = try Secp256k1.PrivateKey()
+        let xonly = try Secp256k1.XOnlyPublicKey.from(compressed: priv.publicKey.compressedBytes)
+
+        let digest = Data((1...32).map { UInt8($0) })
+        let sig = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
+
+        XCTAssertEqual(sig.bytes.count, 64)
+        XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig, digest: digest, publicKey: xonly))
+    }
+
+    /// Verification under a DIFFERENT digest must fail. Catches
+    /// "verifier ignores its inputs" regressions.
+    func testSchnorrVerifyRejectsTamperedDigest() throws {
+        let priv = try Secp256k1.PrivateKey()
+        let xonly = try Secp256k1.XOnlyPublicKey.from(compressed: priv.publicKey.compressedBytes)
+
+        let digest = Data(repeating: 0xAB, count: 32)
+        let sig = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
+
+        var tampered = digest
+        tampered[0] ^= 0xFF
+        XCTAssertFalse(Secp256k1.schnorrVerify(signature: sig, digest: tampered, publicKey: xonly))
+    }
+
+    /// Verification with the WRONG pubkey must fail. Catches
+    /// "verifier doesn't actually look at the pubkey" regressions.
+    func testSchnorrVerifyRejectsWrongKey() throws {
+        let alice = try Secp256k1.PrivateKey()
+        let bob   = try Secp256k1.PrivateKey()
+        let bobXonly = try Secp256k1.XOnlyPublicKey.from(compressed: bob.publicKey.compressedBytes)
+
+        let digest = Data(repeating: 0xCD, count: 32)
+        let sig = try Secp256k1.schnorrSign(digest: digest, privKey: alice)
+
+        XCTAssertFalse(Secp256k1.schnorrVerify(signature: sig, digest: digest, publicKey: bobXonly))
+    }
+
+    /// Schnorr signatures are deterministic per BIP-340 with zero
+    /// auxiliary randomness, but the swift-secp256k1 default mixes
+    /// in fresh randomness — so two signatures of the same digest
+    /// SHOULD differ. (If this ever flips to deterministic, the
+    /// signature is still valid; this test just documents the
+    /// current property.)
+    func testSchnorrAuxRandomnessProducesDifferentSigs() throws {
+        let priv = try Secp256k1.PrivateKey()
+        let digest = Data(repeating: 0x01, count: 32)
+        let sig1 = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
+        let sig2 = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
+        XCTAssertNotEqual(sig1.bytes, sig2.bytes,
+                          "default signing path mixes in aux randomness; sigs must differ")
+    }
+
+    /// X-only key has the right shape: 32 bytes, derived from the
+    /// 33-byte compressed form by dropping the parity prefix.
+    func testXOnlyFromCompressed() throws {
+        let priv = try Secp256k1.PrivateKey()
+        let compressed = priv.publicKey.compressedBytes
+        let xonly = try Secp256k1.XOnlyPublicKey.from(compressed: compressed)
+        XCTAssertEqual(xonly.bytes.count, 32)
+        XCTAssertEqual(xonly.bytes, compressed.subdata(in: 1..<33))
+    }
+
+    func testXOnlyRejectsWrongLength() {
+        XCTAssertThrowsError(try Secp256k1.XOnlyPublicKey(bytes: Data(repeating: 0, count: 31)))
+        XCTAssertThrowsError(try Secp256k1.XOnlyPublicKey(bytes: Data(repeating: 0, count: 33)))
+    }
+
+    func testSchnorrSignatureRejectsWrongLength() {
+        XCTAssertThrowsError(try Secp256k1.SchnorrSignature(bytes: Data(repeating: 0, count: 63)))
+        XCTAssertThrowsError(try Secp256k1.SchnorrSignature(bytes: Data(repeating: 0, count: 65)))
+    }
 }
