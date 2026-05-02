@@ -27,6 +27,15 @@ public final class WalletStore {
     public private(set) var address: String?
     public private(set) var pubkey: Secp256k1.PublicKey?
 
+    /// All wallets currently stored in the keystore, ordered by
+    /// createdAt. UI renders this as a switcher.
+    public private(set) var wallets: [WalletDescriptor] = []
+
+    /// id of the currently-active wallet (the one all balance /
+    /// history / send / withdraw operations apply to). nil iff
+    /// `wallets` is empty (= onboarding state).
+    public private(set) var activeWalletID: String?
+
     public var hasWallet: Bool { address != nil }
 
     // MARK: - Live state
@@ -107,16 +116,14 @@ public final class WalletStore {
 
     // MARK: - Lifecycle
 
-    /// Run once at app launch. If a key already exists in the
-    /// keystore, populate identity, refresh state, and start the
-    /// SSE event loop. If not, leaves the store in its empty
-    /// onboarding-ready state.
+    /// Run once at app launch. Loads the wallet list from the
+    /// keystore and activates whichever wallet was active in the
+    /// previous session (or the most recent, if the saved id is
+    /// stale). On a fresh install the list is empty and the store
+    /// stays in its onboarding-ready state.
     public func bootstrap() async {
         do {
-            if let pub = try keystore.publicKey() {
-                self.pubkey = pub
-                self.address = try Self.taprootAddress(for: pub)
-            }
+            try refreshWalletList()
         } catch {
             lastError = "load keystore: \(error.localizedDescription)"
         }
@@ -126,53 +133,87 @@ public final class WalletStore {
         }
     }
 
-    /// Onboarding — generate a fresh keypair, derive the address,
-    /// and prime live state. Throws if a key already exists (the
-    /// keystore guard) so we can't accidentally overwrite funds.
-    public func createWallet() async throws {
-        let pub = try keystore.createKey()
-        self.pubkey = pub
-        self.address = try Self.taprootAddress(for: pub)
+    /// Create a new wallet (fresh keypair) and switch to it.
+    public func createWallet(name: String = "Wallet") async throws {
+        _ = try keystore.createWallet(name: name)
+        try refreshWalletList()
         await refresh()
         startEventLoop()
     }
 
-    /// Import an existing wallet from a 32-byte hex private key.
-    /// Same lifecycle as `createWallet` once the key is loaded —
-    /// derive the Taproot address, refresh state (so any pre-existing
-    /// UTXOs at this address show up immediately), start the SSE
-    /// event loop. Throws on invalid hex / wrong length / out-of-range
-    /// scalar / a wallet already being present.
-    public func importWallet(privateKeyHex: String) async throws {
+    /// Import a wallet from a 32-byte hex private key. The new
+    /// wallet is added alongside existing ones (no overwrite) and
+    /// becomes active. Throws on invalid hex / wrong length /
+    /// out-of-range scalar.
+    public func importWallet(name: String, privateKeyHex: String) async throws {
         let trimmed = privateKeyHex.trimmingCharacters(in: .whitespacesAndNewlines)
         let raw = try Data(hex: trimmed)
         guard raw.count == 32 else {
             throw WalletKeystoreError.unhandledStatus(0)
         }
         let priv = try Secp256k1.PrivateKey(rawBytes: raw)
-        let pub = try keystore.importKey(priv)
-        self.pubkey = pub
-        self.address = try Self.taprootAddress(for: pub)
+        _ = try keystore.importWallet(name: name, priv: priv)
+        try refreshWalletList()
         await refresh()
         startEventLoop()
     }
 
-    /// Wipes the key and resets live state. Stops the SSE loop.
-    /// Used by the settings "reset wallet" flow; idempotent on a
-    /// keystore that already lacks a key.
-    public func deleteWallet() throws {
+    /// Switch the active wallet. Re-derives the address, restarts
+    /// the SSE loop, and refreshes balance/history for the new
+    /// wallet. No biometric prompt — only the public key is read.
+    public func selectWallet(id: String) async throws {
+        guard id != activeWalletID else { return }
+        try keystore.selectWallet(id: id)
         eventTask?.cancel()
         eventTask = nil
-        try keystore.delete()
-        pubkey = nil
-        address = nil
+        try refreshWalletList()
+        // Reset live state so the previous wallet's balance/history
+        // doesn't briefly flash through during the switch.
         balance = 0
         utxoCount = 0
         history = []
-        feeRates = nil
-        operatorInfo = nil
         withdrawalStatuses = [:]
         connectionState = .idle
+        await refresh()
+        startEventLoop()
+    }
+
+    /// Delete a wallet. If it's the active one, the most recent
+    /// remaining wallet (if any) becomes active and lifecycle state
+    /// rotates accordingly. Idempotent on an unknown id.
+    public func deleteWallet(id: String) async throws {
+        let wasActive = (id == activeWalletID)
+        try keystore.deleteWallet(id: id)
+        try refreshWalletList()
+        if wasActive {
+            eventTask?.cancel()
+            eventTask = nil
+            balance = 0
+            utxoCount = 0
+            history = []
+            withdrawalStatuses = [:]
+            connectionState = .idle
+            if hasWallet {
+                await refresh()
+                startEventLoop()
+            }
+        }
+    }
+
+    /// Re-read the wallet list from the keystore and re-derive
+    /// pubkey + address for the active wallet. Cheap (no biometric
+    /// prompt) — both pubkey and metadata live in unprotected
+    /// keychain attributes.
+    private func refreshWalletList() throws {
+        wallets = try keystore.listWallets()
+        activeWalletID = keystore.activeWalletID()
+        if let id = activeWalletID, let pub = try keystore.publicKey(walletID: id) {
+            pubkey = pub
+            address = try Self.taprootAddress(for: pub)
+        } else {
+            pubkey = nil
+            address = nil
+        }
     }
 
     /// Build, sign, and submit an L2 transfer to `recipient` for

@@ -26,15 +26,19 @@ final class WalletKeystoreTests: XCTestCase {
         XCTAssertEqual(created.compressedBytes, loaded.compressedBytes)
     }
 
-    /// Calling createKey twice without an intervening delete is a
-    /// programmer bug — could overwrite a funded wallet with a
-    /// freshly generated key. Surface it loudly.
-    func testCreateKeyTwiceFails() throws {
+    /// Multi-wallet: calling createKey twice produces TWO wallets,
+    /// each with its own keypair. The most-recently-created becomes
+    /// active; both are listed.
+    func testCreateKeyTwiceProducesTwoWallets() throws {
         let ks = InMemoryWalletKeystore()
-        _ = try ks.createKey()
-        XCTAssertThrowsError(try ks.createKey()) { err in
-            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
-        }
+        let pub1 = try ks.createKey()
+        let pub2 = try ks.createKey()
+        XCTAssertNotEqual(pub1.compressedBytes, pub2.compressedBytes)
+        let listed = try ks.listWallets()
+        XCTAssertEqual(listed.count, 2)
+        // The active (publicKey()) is the most recently created.
+        let active = try XCTUnwrap(try ks.publicKey())
+        XCTAssertEqual(active.compressedBytes, pub2.compressedBytes)
     }
 
     /// importKey adopts an externally-supplied privkey AND publicKey()
@@ -55,31 +59,77 @@ final class WalletKeystoreTests: XCTestCase {
         XCTAssertEqual(imported.compressedBytes, priv.publicKey.compressedBytes)
     }
 
-    /// importKey enforces the same overwrite-safety contract as
-    /// createKey — no silent replacement of a funded wallet.
-    func testImportKeyTwiceFails() throws {
+    /// Multi-wallet: importing the same priv twice creates TWO
+    /// independent wallets (ids differ; pubkey content matches).
+    /// The user's "I imported the same key by mistake" mistake is
+    /// recoverable via deleteWallet — which is fine.
+    func testImportKeyTwiceProducesTwoWallets() throws {
         let ks = InMemoryWalletKeystore()
         let priv = try Secp256k1.PrivateKey()
         _ = try ks.importKey(priv)
-        XCTAssertThrowsError(try ks.importKey(priv)) { err in
-            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
-        }
+        _ = try ks.importKey(priv)
+        let listed = try ks.listWallets()
+        XCTAssertEqual(listed.count, 2)
+        XCTAssertNotEqual(listed[0].id, listed[1].id)
     }
 
-    /// importKey-then-create must also fail (the keystore is full,
-    /// regardless of which path filled it). And vice versa.
-    func testImportAndCreateAreMutuallyExclusive() throws {
+    /// Multi-wallet: import-then-create + create-then-import both
+    /// produce exactly two wallets — keystore is no longer a single
+    /// slot, so the old "second call replaces the first" semantics
+    /// is gone by design.
+    func testImportAndCreateBuildIndependentWallets() throws {
         let ks1 = InMemoryWalletKeystore()
         _ = try ks1.createKey()
-        XCTAssertThrowsError(try ks1.importKey(Secp256k1.PrivateKey())) { err in
-            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
-        }
+        _ = try ks1.importKey(Secp256k1.PrivateKey())
+        XCTAssertEqual(try ks1.listWallets().count, 2)
 
         let ks2 = InMemoryWalletKeystore()
         _ = try ks2.importKey(try Secp256k1.PrivateKey())
-        XCTAssertThrowsError(try ks2.createKey()) { err in
-            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
+        _ = try ks2.createKey()
+        XCTAssertEqual(try ks2.listWallets().count, 2)
+    }
+
+    /// Multi-wallet: switching between wallets via selectWallet
+    /// changes which key publicKey() / sign() operate on.
+    func testSelectWalletSwitchesActive() throws {
+        let ks = InMemoryWalletKeystore()
+        let d1 = try ks.createWallet(name: "A")
+        let d2 = try ks.createWallet(name: "B")
+        XCTAssertEqual(ks.activeWalletID(), d2.id)
+
+        try ks.selectWallet(id: d1.id)
+        XCTAssertEqual(ks.activeWalletID(), d1.id)
+        let activePub = try XCTUnwrap(try ks.publicKey())
+        let pub1 = try XCTUnwrap(try ks.publicKey(walletID: d1.id))
+        XCTAssertEqual(activePub.compressedBytes, pub1.compressedBytes)
+    }
+
+    /// Multi-wallet: selecting an unknown id surfaces a typed error.
+    func testSelectUnknownWalletFails() throws {
+        let ks = InMemoryWalletKeystore()
+        _ = try ks.createWallet(name: "A")
+        XCTAssertThrowsError(try ks.selectWallet(id: "not-a-real-id")) { err in
+            guard case WalletKeystoreError.unknownWallet = err else {
+                return XCTFail("wrong error: \(err)")
+            }
         }
+    }
+
+    /// Multi-wallet: deleting the active wallet rotates active to
+    /// the most recently created remaining wallet (or nil if none).
+    func testDeleteActiveRotatesToNextRemaining() throws {
+        let ks = InMemoryWalletKeystore()
+        let d1 = try ks.createWallet(name: "A")
+        let d2 = try ks.createWallet(name: "B")
+        XCTAssertEqual(ks.activeWalletID(), d2.id)
+
+        try ks.deleteWallet(id: d2.id)
+        XCTAssertEqual(ks.activeWalletID(), d1.id)
+        XCTAssertEqual(try ks.listWallets().map(\.id), [d1.id])
+
+        try ks.deleteWallet(id: d1.id)
+        XCTAssertNil(ks.activeWalletID())
+        XCTAssertTrue(try ks.listWallets().isEmpty)
     }
 
     /// An imported key signs and the resulting sig validates under
@@ -207,7 +257,7 @@ extension InMemoryWalletKeystore {
         // a public seed-from-bytes initializer because production
         // wallets never want one (every key is fresh from libsecp's
         // CSRNG). Tests are the exception.
-        ks._setPrivateKeyForTesting(privKey)
+        ks._insertForTesting(id: "test-wallet", name: "Test", priv: privKey)
         return ks
     }
 }

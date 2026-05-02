@@ -90,17 +90,30 @@ struct OnboardingView: View {
 /// about clipboard exposure, and a single import button. Hex import
 /// is a power-user feature; the eventual mainstream restore path is
 /// BIP-39 mnemonic and will live in a separate sheet with its own UX.
-private struct ImportKeyView: View {
+/// ImportKeyView — paste a 64-char hex private key, name the wallet,
+/// and adopt it. Internally this calls
+/// `WalletStore.importWallet(name:privateKeyHex:)`, which adds the
+/// imported key as a NEW wallet alongside any existing ones (no
+/// overwrite — multi-wallet keystore).
+struct ImportKeyView: View {
     @Environment(\.wallet) private var wallet
     @Environment(\.dismiss) private var dismiss
 
     @State private var hex: String = ""
+    @State private var name: String = "Imported"
     @State private var importing = false
     @State private var error: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Wallet name") {
+                    TextField("e.g. Gift wallet", text: $name)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.words)
+                        #endif
+                }
+
                 Section("Private key (64 hex characters)") {
                     TextField("d47e4d8a…", text: $hex, axis: .vertical)
                         .autocorrectionDisabled()
@@ -137,10 +150,14 @@ private struct ImportKeyView: View {
                     Button(importing ? "Importing…" : "Import") {
                         Task { await runImport() }
                     }
-                    .disabled(!isValidHex || importing)
+                    .disabled(!canSubmit)
                 }
             }
         }
+    }
+
+    private var canSubmit: Bool {
+        !importing && !name.trimmingCharacters(in: .whitespaces).isEmpty && isValidHex
     }
 
     private var isValidHex: Bool {
@@ -154,7 +171,10 @@ private struct ImportKeyView: View {
         defer { importing = false }
         error = nil
         do {
-            try await wallet.importWallet(privateKeyHex: hex)
+            try await wallet.importWallet(
+                name: name.trimmingCharacters(in: .whitespaces),
+                privateKeyHex: hex
+            )
             dismiss()
         } catch {
             self.error = "import failed: \(error.localizedDescription)"

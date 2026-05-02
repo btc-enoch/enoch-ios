@@ -11,6 +11,7 @@ import EnochCore
 
 struct HomeView: View {
     @Environment(\.wallet) private var wallet
+    @State private var showingWalletPicker = false
 
     var body: some View {
         ScrollView {
@@ -23,16 +24,33 @@ struct HomeView: View {
             }
             .padding()
         }
-        .navigationTitle("Wallet")
+        .navigationTitle(activeWalletName)
         .toolbar {
-            // .topBarTrailing is iOS-only; .primaryAction is the
-            // cross-platform equivalent that maps to top-right on
-            // iOS and the toolbar on macOS.
+            // Leading: wallet switcher. Tapping the title would also
+            // make sense here, but a leading button is the
+            // conventional "switch context" affordance on iOS (think
+            // Mail's mailbox picker).
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    showingWalletPicker = true
+                } label: {
+                    Image(systemName: "rectangle.stack.badge.person.crop")
+                }
+                .accessibilityLabel("Switch wallet")
+            }
             ToolbarItem(placement: .primaryAction) {
                 ConnectionPill(state: wallet.connectionState)
             }
         }
         .refreshable { await wallet.refresh() }
+        .sheet(isPresented: $showingWalletPicker) {
+            WalletPickerView()
+        }
+    }
+
+    private var activeWalletName: String {
+        guard let id = wallet.activeWalletID else { return "Wallet" }
+        return wallet.wallets.first(where: { $0.id == id })?.name ?? "Wallet"
     }
 }
 
