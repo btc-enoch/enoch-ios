@@ -20,12 +20,9 @@ final class DepositAddressTests: XCTestCase {
         "2102" + String(repeating: "15", count: 32) +
         "55ae"
 
-    /// Synthetic L2 pubkey: 0x02 || 0x55×32. Even-Y, deterministic.
-    private static let l2Pubkey: Data = {
-        var d = Data([0x02])
-        d.append(Data(repeating: 0x55, count: 32))
-        return d
-    }()
+    /// Synthetic 32-byte x-only L2 pubkey. Same bytes a real wallet
+    /// would expose via its `enoch1p...` Taproot address.
+    private static let l2XOnly = Data(repeating: 0x55, count: 32)
 
     /// PARITY VECTOR — bytes computed by the Python derivation
     /// (deposit_output_key) on the inputs above. Must match exactly;
@@ -33,16 +30,16 @@ final class DepositAddressTests: XCTestCase {
     /// said to send funds" differs from the wallet's view, which is
     /// silently fund-losing.
     private static let expectedOutputKeyHex =
-        "9e1aa512595a8dccec8d25c99c7c48a839a6b3248bc59a1f1800ab93397d8601"
+        "f9f78d7604f88d31759f11b8a6f5a0082cb9e174ef120df305b9bde35ef4f23e"
     private static let expectedRegtestAddr =
-        "bcrt1pncd22yjet2xuemydyhyeclzg4qu6dvey30ze58ccqz4exwtascqsklpte2"
+        "bcrt1pl8mc6asylzxnzavlzxu2dadqpqktnct5aufqmuc9hx77xhh57glq6s74gq"
     private static let expectedMainnetAddr =
-        "bc1pncd22yjet2xuemydyhyeclzg4qu6dvey30ze58ccqz4exwtascqsvwazkl"
+        "bc1pl8mc6asylzxnzavlzxu2dadqpqktnct5aufqmuc9hx77xhh57glqqpzu84"
 
     func testOutputKeyMatchesPythonVector() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
         let outputKey = try DepositAddress.outputKey(
-            l2Pubkey: Self.l2Pubkey,
+            l2XOnly: Self.l2XOnly,
             bridgeRedeemScript: redeem
         )
         XCTAssertEqual(outputKey.count, 32)
@@ -55,7 +52,7 @@ final class DepositAddressTests: XCTestCase {
 
     func testRegtestAddressMatchesPythonVector() throws {
         let addr = try DepositAddress.derive(
-            l2Pubkey: Self.l2Pubkey,
+            l2XOnly: Self.l2XOnly,
             bridgeRedeemScriptHex: Self.bridgeRedeemHex,
             network: .regtest
         )
@@ -65,7 +62,7 @@ final class DepositAddressTests: XCTestCase {
 
     func testMainnetAddressMatchesPythonVector() throws {
         let addr = try DepositAddress.derive(
-            l2Pubkey: Self.l2Pubkey,
+            l2XOnly: Self.l2XOnly,
             bridgeRedeemScriptHex: Self.bridgeRedeemHex,
             network: .mainnet
         )
@@ -78,23 +75,26 @@ final class DepositAddressTests: XCTestCase {
     /// being mixed into the merkle root.
     func testDifferentPubkeysProduceDifferentAddresses() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
-        let pubA = Self.l2Pubkey
-        var pubB = Data([0x02])
-        pubB.append(Data(repeating: 0x66, count: 32))
+        let xonlyA = Self.l2XOnly
+        let xonlyB = Data(repeating: 0x66, count: 32)
 
-        let keyA = try DepositAddress.outputKey(l2Pubkey: pubA, bridgeRedeemScript: redeem)
-        let keyB = try DepositAddress.outputKey(l2Pubkey: pubB, bridgeRedeemScript: redeem)
+        let keyA = try DepositAddress.outputKey(l2XOnly: xonlyA, bridgeRedeemScript: redeem)
+        let keyB = try DepositAddress.outputKey(l2XOnly: xonlyB, bridgeRedeemScript: redeem)
         XCTAssertNotEqual(keyA, keyB, "per-user salt must affect the merkle root")
     }
 
     /// Wrong-length pubkey is rejected with a typed error rather than
-    /// silently producing an address from truncated bytes.
+    /// silently producing an address from truncated bytes. 33-byte
+    /// compressed form is the previous shape — it must error so
+    /// callers don't accidentally pass the wrong representation.
     func testRejectsInvalidPubkeyLength() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
+        var compressed = Data([0x02])
+        compressed.append(Data(repeating: 0x55, count: 32))
         XCTAssertThrowsError(
-            try DepositAddress.outputKey(l2Pubkey: Data(repeating: 0x02, count: 32), bridgeRedeemScript: redeem)
+            try DepositAddress.outputKey(l2XOnly: compressed, bridgeRedeemScript: redeem)
         ) { err in
-            guard case DepositAddress.Error.invalidL2Pubkey = err else {
+            guard case DepositAddress.Error.invalidL2XOnly = err else {
                 return XCTFail("wrong error: \(err)")
             }
         }

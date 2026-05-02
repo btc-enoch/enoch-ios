@@ -1,11 +1,16 @@
 // DepositAddress — per-user Bitcoin L1 deposit address derivation (#108).
 //
 // Each L2 user has a unique L1 deposit address derived deterministically
-// from their L2 pubkey + the bridge's existing 3-of-5 multisig redeem
-// script. Construction (BIP-341 script-path Taproot, no keypath spend):
+// from their 32-byte x-only L2 pubkey + the bridge's 3-of-5 multisig
+// redeem script. Using x-only (the same bytes embedded in the user's
+// `enoch1p...` Taproot address) lets the operator derive a user's
+// deposit address from any observed L2 address — no parity ambiguity,
+// no separate pubkey-registration call.
+//
+// Construction (BIP-341 script-path Taproot, no keypath spend):
 //
 //   internal_pubkey = NUMS                 (well-known unspendable point)
-//   user_salt   = tagged_hash("EnochUserDeposit", L2_PUBKEY)
+//   user_salt   = tagged_hash("EnochUserDeposit", L2_XONLY)
 //   leaf_script = <user_salt> OP_DROP <BRIDGE_REDEEM_SCRIPT>
 //   leaf_hash   = tagged_hash("TapLeaf", 0xc0 || varint(|leaf_script|) || leaf_script)
 //   merkle_root = leaf_hash                (single-leaf tree)
@@ -46,7 +51,7 @@ public enum DepositAddress {
     }
 
     public enum Error: Swift.Error, Equatable {
-        case invalidL2Pubkey(byteCount: Int)
+        case invalidL2XOnly(byteCount: Int)
         case invalidRedeemScriptHex
         case bech32(String)
         case crypto(String)
@@ -54,14 +59,14 @@ public enum DepositAddress {
 
     /// Derive the user's L1 deposit address.
     ///
-    /// `l2Pubkey` is the user's 33-byte compressed secp256k1 pubkey
-    /// — the same key the wallet uses for its L2 P2TR receive
-    /// address.
+    /// `l2XOnly` is the user's 32-byte BIP-340 x-only secp256k1
+    /// pubkey — the same bytes embedded in the user's `enoch1p...`
+    /// Taproot address.
     /// `bridgeRedeemScriptHex` comes from `/v1/info`'s
     /// `bridge_redeem_script` field.
     /// `network` selects the bech32m HRP.
     public static func derive(
-        l2Pubkey: Data,
+        l2XOnly: Data,
         bridgeRedeemScriptHex: String,
         network: Network
     ) throws -> String {
@@ -73,7 +78,7 @@ public enum DepositAddress {
         }
 
         let outputKey = try outputKey(
-            l2Pubkey: l2Pubkey,
+            l2XOnly: l2XOnly,
             bridgeRedeemScript: bridgeRedeem
         )
 
@@ -99,13 +104,13 @@ public enum DepositAddress {
     /// key. Useful for cross-language parity tests + for callers that
     /// want the raw scriptPubkey bytes (`OP_1 <push 32> <output_key>`).
     public static func outputKey(
-        l2Pubkey: Data,
+        l2XOnly: Data,
         bridgeRedeemScript: Data
     ) throws -> Data {
-        guard l2Pubkey.count == 33 else {
-            throw Error.invalidL2Pubkey(byteCount: l2Pubkey.count)
+        guard l2XOnly.count == 32 else {
+            throw Error.invalidL2XOnly(byteCount: l2XOnly.count)
         }
-        let salt = Secp256k1.taggedHash(tag: "EnochUserDeposit", data: l2Pubkey)
+        let salt = Secp256k1.taggedHash(tag: "EnochUserDeposit", data: l2XOnly)
 
         // tap-leaf script = <push 32> <salt> OP_DROP <varint-prefixed
         // redeem script>. The leaf is encoded as a normal Bitcoin
