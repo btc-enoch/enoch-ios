@@ -1,19 +1,28 @@
 // TxBuilder — orchestrate "send N sats to address X" into a fully
 // signed Tx ready for EdgeClient.submitTx.
 //
-// The build path:
-//   1. Fetch operator info (fee schedule, fee-pool address).
-//   2. Fetch the wallet's UTXOs.
-//   3. Decode recipient + fee-pool addresses to pkh.
+// Post-#109 the wallet is uniformly P2TR keypath:
+//   - Wallet's own UTXOs are at `enoch1p...` (Taproot output key)
+//   - Inputs sign via BIP-341 keypath sighash + BIP-340 Schnorr
+//   - The sig goes into TxInput.witness (single 64-byte element);
+//     scriptSig stays empty
+//   - Recipients can be either P2TR (preferred) or P2PKH (legacy
+//     enoch1...) — the wallet decodes via Address.decode and emits
+//     the matching scriptPubKey
+//
+// Build path:
+//   1. Derive wallet's Taproot address from pubkey (no biometric).
+//   2. Fetch operator info + UTXOs in parallel.
+//   3. Decode recipient + fee-pool addresses; build scriptPubKeys.
 //   4. Run CoinSelection over the UTXOs.
-//   5. Construct the unsigned Tx (inputs + recipient/change/fee outputs).
-//   6. For each input: compute sighashLegacyAll, sign via the keystore,
-//      splice DER+sighash + compressed pubkey into scriptSig.
+//   5. Construct unsigned Tx: recipient + fee + change outputs;
+//      empty inputs (no scriptSig, no witness yet).
+//   6. For each input: compute BIP-341 keypath sighash + biometric-
+//      gated Schnorr sign + populate input.witness = [sig].
 //   7. Return the signed Tx.
 //
-// The keystore biometric prompt fires once per input today. A future
-// optimization is a batch-sign API that authenticates one LAContext
-// and reuses it across N digests — out of scope for the PoC.
+// One biometric prompt per input today. Batch-sign across N inputs
+// in a single Face ID prompt is a future ergonomic improvement.
 
 import Foundation
 
@@ -24,9 +33,10 @@ public enum TxBuilderError: Swift.Error {
     case selectInputs(CoinSelectionError)
     case decodeRecipient(Swift.Error)
     case decodeFeePool(Swift.Error)
+    case unsupportedRecipient(String)  // e.g. P2WPKH (segwit v0) — L2 doesn't speak it
     case invalidPrevScriptPubKey(input: Int)
     case sign(input: Int, underlying: Swift.Error)
-    case scriptSigBuild(input: Int, underlying: Swift.Error)
+    case scriptBuild(input: Int, underlying: Swift.Error)
     case fetchInfo(Swift.Error)
     case fetchUTXOs(Swift.Error)
     case buildBurnOutput(Swift.Error)
@@ -42,48 +52,34 @@ public final class TxBuilder {
     }
 
     /// Build, sign, and return a Tx that sends `amountSatoshi` to
-    /// `recipient` (any address format) from the wallet's address.
-    /// The returned tx is ready for `EdgeClient.submitTx`.
-    ///
-    /// Operator fee accounting: we read the per-tx fee from
-    /// `/v1/info` and emit a separate output paying the fee pool.
-    /// If the surplus over recipient + fee is non-dust, a change
-    /// output returns to the wallet's own address; otherwise the
-    /// dust is rolled into the fee.
+    /// `recipient` (any address format the operator recognizes — L2
+    /// P2TR `enoch1p...` and legacy P2PKH `enoch1...` both supported)
+    /// from the wallet's address.
     public func buildSendTx(
         recipient: String,
         amountSatoshi: UInt64,
         biometricPrompt: String
     ) async throws -> Tx {
-        let pkh: Data
+        let recipientScript: Data
         do {
-            pkh = try Address.decodeToPKH(recipient)
+            recipientScript = try Self.scriptForRecipient(recipient)
+        } catch let e as TxBuilderError {
+            throw e
         } catch {
             throw TxBuilderError.decodeRecipient(error)
         }
-        let recipientOutput = TxOutput(
-            amount: amountSatoshi,
-            scriptPubKey: try Script.p2pkhScriptPubKey(pkh: pkh)
-        )
+        let recipientOutput = TxOutput(amount: amountSatoshi, scriptPubKey: recipientScript)
         return try await buildOutgoing(
             recipientOutput: recipientOutput,
             biometricPrompt: biometricPrompt
         )
     }
 
-    /// Build, sign, and return a Tx that initiates an L2 → L1
-    /// withdrawal (peg-out): the "recipient" output is an OP_RETURN
-    /// `ENOCH:WD:<bitcoinAddress>` burn marker. The bridge agents
-    /// pick it up after the L2 challenge window, 3-of-5 sign a
-    /// Bitcoin tx paying the L1 address from the bridge multisig,
-    /// and broadcast it. The user's L2 burn amount is the *gross*
-    /// payout — the bridge eats the L1 mining fee from its own
-    /// UTXOs, not from the user's burn.
-    ///
-    /// `bitcoinAddress` is passed through verbatim into the
-    /// OP_RETURN payload (length capped at 66 chars). The bridge
-    /// agents validate the address format on their end; the wallet
-    /// doesn't pre-decode because it doesn't need to.
+    /// Build, sign, and return a Tx initiating an L2 → L1 peg-out:
+    /// the "recipient" output is an `OP_RETURN ENOCH:WD:<bitcoinAddress>`
+    /// burn marker. Bridge agents pick it up after the L2 challenge
+    /// window, 3-of-5 sign a Bitcoin tx paying the L1 address from
+    /// the bridge multisig, and broadcast it.
     public func buildWithdrawTx(
         bitcoinAddress: String,
         amountSatoshi: UInt64,
@@ -102,11 +98,10 @@ public final class TxBuilder {
         )
     }
 
-    /// Shared core of buildSendTx and buildWithdrawTx. Caller
-    /// provides the pre-built recipient output (a P2PKH for L2
-    /// sends, an OP_RETURN burn for L2 → L1 withdrawals); we handle
-    /// the rest: fetch operator info + UTXOs, run coin selection,
-    /// add fee + change outputs, sign every input.
+    /// Shared core. Caller provides the pre-built recipient output
+    /// (a P2TR or P2PKH spend for L2 sends, OP_RETURN burn for L2 →
+    /// L1 withdrawals); we handle fetch + selection + fee + change +
+    /// per-input Schnorr signing.
     private func buildOutgoing(
         recipientOutput: TxOutput,
         biometricPrompt: String
@@ -114,9 +109,12 @@ public final class TxBuilder {
         guard let publicKey = try keystore.publicKey() else {
             throw TxBuilderError.noWalletKey
         }
-        let myAddress = try Address.encodeEnoch(publicKey: publicKey)
+        // Pubkey-side Taproot output key + address (no biometric).
+        let myOutputKey = try publicKey.taprootOutputKey()
+        let myAddress = try Address.encodeTaproot(outputKey: myOutputKey.bytes)
+        let myChangeScript = try Script.taprootScriptPubKey(outputKey: myOutputKey.bytes)
 
-        // Parallel fetch of operator info + UTXOs.
+        // Parallel fetch: operator info + UTXOs.
         async let infoTask = wrap(TxBuilderError.fetchInfo) {
             try await self.edge.getInfo()
         }
@@ -130,15 +128,15 @@ public final class TxBuilder {
             throw TxBuilderError.missingFeeSchedule
         }
 
-        let feePoolPKH: Data
+        // Fee pool address may be either format during the migration;
+        // post-#109 + B6 it's uniformly P2TR.
+        let feePoolScript: Data
         do {
-            feePoolPKH = try Address.decodeToPKH(info.operator.feePoolAddress)
+            feePoolScript = try Self.scriptForRecipient(info.operator.feePoolAddress)
         } catch {
             throw TxBuilderError.decodeFeePool(error)
         }
 
-        // Coin selection: target is the recipient's amount; fee is
-        // the operator's flat per-tx fee.
         let selection: CoinSelection.Selection
         do {
             selection = try CoinSelection.select(
@@ -150,57 +148,86 @@ public final class TxBuilder {
             throw TxBuilderError.selectInputs(e)
         }
 
-        // Build unsigned tx: recipient (caller-supplied) + fee + change.
+        // Outputs: recipient + fee + (optional) change.
         var outputs: [TxOutput] = [
             recipientOutput,
-            TxOutput(amount: selection.feeSatoshi, scriptPubKey: try Script.p2pkhScriptPubKey(pkh: feePoolPKH)),
+            TxOutput(amount: selection.feeSatoshi, scriptPubKey: feePoolScript),
         ]
         if selection.changeSatoshi > 0 {
-            let myPKH = Hashing.hash160(publicKey.compressedBytes)
-            outputs.append(TxOutput(
-                amount: selection.changeSatoshi,
-                scriptPubKey: try Script.p2pkhScriptPubKey(pkh: myPKH)
-            ))
+            outputs.append(TxOutput(amount: selection.changeSatoshi, scriptPubKey: myChangeScript))
         }
 
+        // Inputs: empty scriptSig + empty witness; we'll fill witness below.
+        // Sequence is non-final to keep the tx RBF-eligible at L1
+        // (irrelevant for L2 acceptance but mirrors the Bitcoin shape).
         let inputs: [TxInput] = try selection.inputs.map { utxo in
             TxInput(
                 txHash: try Data(hex: utxo.txHash),
                 vout: utxo.vout,
                 scriptSig: Data(),
-                sequence: 0xFFFFFFFF
+                sequence: 0xFFFFFFFE,
+                witness: []
             )
         }
-        var tx = Tx(version: 1, inputs: inputs, outputs: outputs, lockTime: 0)
+        var tx = Tx(version: 2, inputs: inputs, outputs: outputs, lockTime: 0)
 
-        // Sign each input. Each sighash uses the prevScriptPubKey
-        // of the spent UTXO — recovered from the UTXOWire we
-        // already have.
-        for i in 0..<tx.inputs.count {
-            let prevScriptPubKey: Data
-            do {
-                prevScriptPubKey = try Data(hex: selection.inputs[i].scriptPubKey)
-            } catch {
-                throw TxBuilderError.invalidPrevScriptPubKey(input: i)
+        // BIP-341 sighash commits to ALL inputs' amounts + scripts,
+        // not just the one being signed — so we hand the full
+        // prevouts list to every per-input call. Both pieces come
+        // from the UTXOWire the operator returned.
+        let prevouts: [Tx.Prevout]
+        do {
+            prevouts = try selection.inputs.map { utxo in
+                Tx.Prevout(
+                    amountSatoshi: utxo.amount,
+                    scriptPubKey: try Data(hex: utxo.scriptPubKey)
+                )
             }
-            let digest = try tx.sighashLegacyAll(inputIndex: i, prevScriptPubKey: prevScriptPubKey)
-            let sig: Secp256k1.Signature
+        } catch {
+            throw TxBuilderError.invalidPrevScriptPubKey(input: 0)
+        }
+
+        // Sign each input.
+        for i in 0..<tx.inputs.count {
+            let digest: Data
             do {
-                sig = try await keystore.sign(digest: digest, prompt: biometricPrompt)
+                digest = try tx.sighashBIP341Keypath(inputIndex: i, prevouts: prevouts)
             } catch {
                 throw TxBuilderError.sign(input: i, underlying: error)
             }
+            let sig: Secp256k1.SchnorrSignature
             do {
-                tx.inputs[i].scriptSig = try Script.p2pkhScriptSig(
-                    sigWithSighashType: sig.derWithSighashAll,
-                    compressedPubKey: publicKey.compressedBytes
-                )
+                sig = try await keystore.signTaprootKeypath(digest: digest, prompt: biometricPrompt)
             } catch {
-                throw TxBuilderError.scriptSigBuild(input: i, underlying: error)
+                throw TxBuilderError.sign(input: i, underlying: error)
             }
+            // P2TR keypath spend: witness is a single element — the
+            // 64-byte Schnorr signature. SIGHASH_DEFAULT, no sighash
+            // byte appended.
+            tx.inputs[i].witness = [sig.bytes]
+            // scriptSig stays empty.
         }
 
         return tx
+    }
+
+    /// Decode an address and emit the matching scriptPubKey. Supports
+    /// the two L2-receive formats; rejects anything else with a clear
+    /// error so the caller can surface a "wrong address type" message.
+    static func scriptForRecipient(_ address: String) throws -> Data {
+        let decoded = try Address.decode(address)
+        switch decoded {
+        case .p2tr(let outputKey):
+            return try Script.taprootScriptPubKey(outputKey: outputKey)
+        case .p2pkh(let pkh):
+            // Legacy enoch1... — still valid as a recipient during
+            // the migration window. Both shapes coexist on L2.
+            return try Script.p2pkhScriptPubKey(pkh: pkh)
+        case .p2wpkh:
+            // Bitcoin segwit v0 P2WPKH (`bc1q.../tb1q...`) — not an
+            // L2 address, can't be a recipient on this rail.
+            throw TxBuilderError.unsupportedRecipient("P2WPKH (Bitcoin segwit v0) — not an L2 address")
+        }
     }
 }
 

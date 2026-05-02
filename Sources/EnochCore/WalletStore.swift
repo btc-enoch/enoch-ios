@@ -115,7 +115,7 @@ public final class WalletStore {
         do {
             if let pub = try keystore.publicKey() {
                 self.pubkey = pub
-                self.address = try Address.encodeEnoch(publicKey: pub)
+                self.address = try Self.taprootAddress(for: pub)
             }
         } catch {
             lastError = "load keystore: \(error.localizedDescription)"
@@ -318,5 +318,14 @@ public final class WalletStore {
         } catch {
             return .failure(error)
         }
+    }
+
+    /// Derive the user's `enoch1p...` Taproot receive address from
+    /// their pubkey. Pubkey-side derivation (BIP-341 keypath tweak)
+    /// — no biometric prompt; safe to call at app launch / on every
+    /// render of the Receive tab.
+    static func taprootAddress(for pub: Secp256k1.PublicKey) throws -> String {
+        let outputKey = try pub.taprootOutputKey()
+        return try Address.encodeTaproot(outputKey: outputKey.bytes)
     }
 }
