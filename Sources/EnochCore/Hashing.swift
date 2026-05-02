@@ -6,6 +6,13 @@ import CryptoKit
 import Foundation
 
 public enum Hashing {
+    /// Single SHA256. Used by BIP-341 sighash sub-hashes
+    /// (sha_prevouts, sha_amounts, sha_outputs) — those are plain
+    /// SHA256, not the double-SHA256 that legacy Bitcoin sighash uses.
+    public static func sha256(_ data: Data) -> Data {
+        return Data(SHA256.hash(data: data))
+    }
+
     /// Double-SHA256, the standard "hash256" used for Bitcoin txids,
     /// merkle nodes, and legacy sighash. Output is 32 bytes in
     /// natural order (not reversed). Display order — what explorers

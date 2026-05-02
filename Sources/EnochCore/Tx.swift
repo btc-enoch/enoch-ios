@@ -59,6 +59,7 @@ public struct TxOutput: Equatable {
 public enum TxError: Swift.Error, Equatable {
     case wrongTxHashLength(input: Int, length: Int)
     case inputIndexOutOfRange(Int)
+    case prevoutCountMismatch(have: Int, need: Int)
 }
 
 // MARK: - Serialization, hashing, sighash
@@ -149,6 +150,102 @@ public extension Tx {
         // SIGHASH_ALL = 0x01, expressed as 4-byte LE = 01 00 00 00.
         serialized.appendUInt32LE(0x00000001)
         return Hashing.hash256(serialized)
+    }
+
+    /// Per-input prevout context the BIP-341 keypath sighash needs.
+    /// Not on TxInput because the wallet learns it from `/v1/utxos`,
+    /// not from the tx structure itself.
+    struct Prevout: Equatable {
+        var amountSatoshi: UInt64
+        var scriptPubKey: Data
+
+        init(amountSatoshi: UInt64, scriptPubKey: Data) {
+            self.amountSatoshi = amountSatoshi
+            self.scriptPubKey = scriptPubKey
+        }
+    }
+
+    /// BIP-341 keypath sighash for input `inputIndex` under
+    /// SIGHASH_DEFAULT (the standard Taproot keypath sighash type).
+    ///
+    /// Algorithm — `sighash = SHA256_TapSighash(preimage)` where
+    /// preimage is:
+    ///
+    ///   hash_type      (1 byte)         0x00 for SIGHASH_DEFAULT
+    ///   nVersion       (4 LE)
+    ///   nLockTime      (4 LE)
+    ///   sha_prevouts   (32)             SHA256 of all input outpoints
+    ///   sha_amounts    (32)             SHA256 of all input amounts
+    ///   sha_scripts    (32)             SHA256 of all input scriptPubKeys
+    ///   sha_sequences  (32)             SHA256 of all input sequences
+    ///   sha_outputs    (32)             SHA256 of all output (amount + script)
+    ///   spend_type     (1 byte)         0x00 for keypath, no annex
+    ///   input_index    (4 LE)
+    ///
+    /// Total preimage = 174 bytes. Final tagged hash uses tag
+    /// "TapSighash". `prevouts.count` MUST equal `inputs.count` —
+    /// BIP-341 commits to ALL inputs' amounts + scripts, not just
+    /// the one being signed.
+    func sighashBIP341Keypath(
+        inputIndex: Int,
+        prevouts: [Prevout]
+    ) throws -> Data {
+        guard inputs.indices.contains(inputIndex) else {
+            throw TxError.inputIndexOutOfRange(inputIndex)
+        }
+        guard prevouts.count == inputs.count else {
+            throw TxError.prevoutCountMismatch(have: prevouts.count, need: inputs.count)
+        }
+
+        var preimage = Data()
+        preimage.append(0x00)                           // hash_type = SIGHASH_DEFAULT
+        preimage.appendUInt32LE(version)
+        preimage.appendUInt32LE(lockTime)
+
+        // sha_prevouts: SHA256( for each input: txHash(wire) || vout LE )
+        var prevoutsBlob = Data()
+        for inp in inputs {
+            // txHash is in display order on TxInput; wire order is reversed.
+            prevoutsBlob.append(Data(inp.txHash.reversed()))
+            prevoutsBlob.appendUInt32LE(inp.vout)
+        }
+        preimage.append(Hashing.sha256(prevoutsBlob))
+
+        // sha_amounts
+        var amountsBlob = Data()
+        for prev in prevouts {
+            amountsBlob.appendUInt64LE(prev.amountSatoshi)
+        }
+        preimage.append(Hashing.sha256(amountsBlob))
+
+        // sha_scripts: SHA256( for each input: varint(script.count) || script )
+        var scriptsBlob = Data()
+        for prev in prevouts {
+            scriptsBlob.appendVarInt(UInt64(prev.scriptPubKey.count))
+            scriptsBlob.append(prev.scriptPubKey)
+        }
+        preimage.append(Hashing.sha256(scriptsBlob))
+
+        // sha_sequences
+        var seqBlob = Data()
+        for inp in inputs {
+            seqBlob.appendUInt32LE(inp.sequence)
+        }
+        preimage.append(Hashing.sha256(seqBlob))
+
+        // sha_outputs: SHA256( for each output: amount LE || varint(spk.count) || spk )
+        var outputsBlob = Data()
+        for out in outputs {
+            outputsBlob.appendUInt64LE(out.amount)
+            outputsBlob.appendVarInt(UInt64(out.scriptPubKey.count))
+            outputsBlob.append(out.scriptPubKey)
+        }
+        preimage.append(Hashing.sha256(outputsBlob))
+
+        preimage.append(0x00)                           // spend_type = keypath, no annex
+        preimage.appendUInt32LE(UInt32(inputIndex))
+
+        return Secp256k1.taggedHash(tag: "TapSighash", data: preimage)
     }
 }
 
