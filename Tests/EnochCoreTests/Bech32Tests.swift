@@ -30,6 +30,39 @@ final class Bech32Tests: XCTestCase {
         XCTAssertEqual(roundTripped, raw)
     }
 
+    /// BIP-350 round trip via the new variant-aware encoder/decoder.
+    /// A bech32m string MUST decode with `variant == .bech32m`; a
+    /// bech32m-encoded string MUST NOT validate under BIP-173.
+    func testBech32mRoundTrip() throws {
+        let raw: [UInt8] = (0..<32).map { UInt8($0) }
+        let data5 = try Bech32.convertBits(raw, from: 8, to: 5, pad: true)
+        let encoded = try Bech32.encode(hrp: "test", data: data5, variant: .bech32m)
+
+        let (hrp, decoded5, variant) = try Bech32.decodeAny(encoded)
+        XCTAssertEqual(hrp, "test")
+        XCTAssertEqual(variant, .bech32m)
+        let roundTripped = try Bech32.convertBits(decoded5, from: 5, to: 8, pad: false)
+        XCTAssertEqual(roundTripped, raw)
+
+        // Strict BIP-173 decoder must reject a bech32m string.
+        XCTAssertThrowsError(try Bech32.decode(encoded)) { err in
+            XCTAssertEqual(err as? Bech32.Error, .invalidChecksum)
+        }
+    }
+
+    /// Cross-variant: a bech32 string MUST decode as `.bech32` via
+    /// the variant-aware decoder. Used as the contract for
+    /// Address.decode's variant dispatch.
+    func testDecodeAnyDistinguishesVariants() throws {
+        let data5 = try Bech32.convertBits([UInt8](repeating: 0, count: 20), from: 8, to: 5, pad: true)
+        let asBech32  = try Bech32.encode(hrp: "test", data: data5, variant: .bech32)
+        let asBech32m = try Bech32.encode(hrp: "test", data: data5, variant: .bech32m)
+
+        XCTAssertEqual(try Bech32.decodeAny(asBech32).variant, .bech32)
+        XCTAssertEqual(try Bech32.decodeAny(asBech32m).variant, .bech32m)
+        XCTAssertNotEqual(asBech32, asBech32m, "the two checksums must produce different strings")
+    }
+
     func testMixedCaseRejected() {
         XCTAssertThrowsError(try Bech32.decode("Bc1Qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")) { err in
             XCTAssertEqual(err as? Bech32.Error, .mixedCase)

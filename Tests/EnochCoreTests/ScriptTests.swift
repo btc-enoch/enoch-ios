@@ -108,4 +108,30 @@ final class ScriptTests: XCTestCase {
             XCTAssertEqual(err as? ScriptError, .burnPayloadTooLong(76))
         }
     }
+
+    /// P2TR scriptPubKey shape: OP_1 (0x51) + push 32 bytes (0x20)
+    /// + 32-byte x-only output key. Always exactly 34 bytes.
+    /// Mirrors the L1 bondscript module's ScriptPubKey output and
+    /// what the operator's BuildP2TRScript will emit post-#109.
+    func testTaprootScriptPubKeyShape() throws {
+        let outputKey = Data((1...32).map { UInt8($0) })
+        let script = try Script.taprootScriptPubKey(outputKey: outputKey)
+
+        var expected = Data()
+        expected.append(0x51)
+        expected.append(0x20)
+        expected.append(outputKey)
+
+        XCTAssertEqual(script, expected)
+        XCTAssertEqual(script.count, 34)
+    }
+
+    func testTaprootScriptPubKeyRejectsWrongLength() {
+        XCTAssertThrowsError(try Script.taprootScriptPubKey(outputKey: Data(repeating: 0, count: 31))) { err in
+            XCTAssertEqual(err as? ScriptError, .wrongOutputKeyLength(31))
+        }
+        XCTAssertThrowsError(try Script.taprootScriptPubKey(outputKey: Data(repeating: 0, count: 33))) { err in
+            XCTAssertEqual(err as? ScriptError, .wrongOutputKeyLength(33))
+        }
+    }
 }

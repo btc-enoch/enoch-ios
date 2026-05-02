@@ -25,11 +25,70 @@ final class AddressTests: XCTestCase {
         XCTAssertEqual(pkh, expected)
     }
 
-    /// Taproot is bech32m, not bech32 — BIP173 decoder rejects it
-    /// at checksum validation. Caller-visible: `bech32(.invalidChecksum)`.
-    func testTaprootRejected() {
+    /// Taproot can't be reduced to a 20-byte pkh, so the legacy
+    /// `decodeToPKH` rejects it. Same input goes through the new
+    /// `decode` API in the dedicated test below.
+    func testTaprootRejectedByDecodeToPKH() {
         let taproot = "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7k7grplx"
-        XCTAssertThrowsError(try Address.decodeToPKH(taproot))
+        XCTAssertThrowsError(try Address.decodeToPKH(taproot)) { err in
+            guard case Address.Error.unsupportedWitnessVersion(let v) = err else {
+                return XCTFail("unexpected error: \(err)")
+            }
+            XCTAssertEqual(v, 1)
+        }
+    }
+
+    /// BIP-86 canonical mainnet Taproot vector — the first receive
+    /// address derived from the BIP-86 test seed (a real 32-byte
+    /// x-only output key, not the 40-byte BIP-350 encoding-test
+    /// vector). The new `decode` API recognizes it as `.p2tr`.
+    func testBitcoinMainnetP2TR() throws {
+        let addr = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
+        let decoded = try Address.decode(addr)
+        guard case .p2tr(let outputKey) = decoded else {
+            return XCTFail("expected .p2tr, got \(decoded)")
+        }
+        XCTAssertEqual(outputKey.count, 32)
+        // BIP-86 test vector: output key of m/86'/0'/0'/0/0
+        XCTAssertEqual(
+            outputKey.map { String(format: "%02x", $0) }.joined(),
+            "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c"
+        )
+    }
+
+    /// Round-trip a 32-byte x-only output key through the `enoch1p...`
+    /// encoding and back. This is the post-#109 L2 receive address.
+    func testEnochTaprootRoundTrip() throws {
+        let outputKey = Data((1...32).map { UInt8($0) })
+        let addr = try Address.encodeTaproot(outputKey: outputKey)
+        XCTAssertTrue(addr.hasPrefix("enoch1p"), "got \(addr)")
+        guard case .p2tr(let recovered) = try Address.decode(addr) else {
+            return XCTFail("expected .p2tr after round-trip")
+        }
+        XCTAssertEqual(recovered, outputKey)
+    }
+
+    /// Wrong-variant cross-checking: a bech32-encoded enoch1... must
+    /// resolve to .p2pkh; a bech32m-encoded enoch1p... must resolve
+    /// to .p2tr. The new variant-aware decoder distinguishes them.
+    func testVariantSplitsLegacyVsTaproot(){
+        let pkh = Data(repeating: 0xab, count: 20)
+        let legacy = try? Address.encodeEnoch(pkh: pkh)
+        XCTAssertNotNil(legacy)
+        if case .p2pkh(let recovered) = try? Address.decode(legacy!) {
+            XCTAssertEqual(recovered, pkh)
+        } else {
+            XCTFail("legacy enoch1 should decode as .p2pkh")
+        }
+
+        let outputKey = Data(repeating: 0xcd, count: 32)
+        let taproot = try? Address.encodeTaproot(outputKey: outputKey)
+        XCTAssertNotNil(taproot)
+        if case .p2tr(let recovered) = try? Address.decode(taproot!) {
+            XCTAssertEqual(recovered, outputKey)
+        } else {
+            XCTFail("enoch1p should decode as .p2tr")
+        }
     }
 
     /// HRP-policed: a syntactically valid bech32 string with an HRP

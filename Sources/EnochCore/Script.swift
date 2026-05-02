@@ -1,13 +1,15 @@
 // Script — minimal Bitcoin Script builders the wallet needs to
-// construct P2PKH outputs and inputs. Mirrors the operator's
-// `BuildP2PKHScript` (output side) and is paired with
-// `Secp256k1.Signature.derWithSighashAll` for the input side.
+// construct user-money outputs and inputs.
 //
-// We don't ship a general Bitcoin Script encoder because Enoch
-// transactions are uniformly P2PKH on both sides — no multisig,
-// no segwit, no Taproot. If those land later, this file grows; for
-// now keeping the surface tight makes correctness obvious at a
-// glance.
+// Pre-#109 (legacy): P2PKH everywhere — `p2pkhScriptPubKey` for
+// outputs, `p2pkhScriptSig` for inputs. Mirrors the operator's
+// `BuildP2PKHScript`.
+//
+// Post-#109: P2TR keypath spends — `taprootScriptPubKey` for
+// outputs, witness construction handled in TxBuilder (Schnorr sig
+// in a single-element witness, no scriptSig). The two paths
+// coexist during the migration window; once #109 + B6 ship, the
+// P2PKH builders are dead code and can be removed.
 
 import Foundation
 
@@ -16,6 +18,7 @@ public enum ScriptError: Swift.Error, Equatable {
     case wrongCompressedPubKeyLength(Int)
     case sigPushTooLong(Int)
     case burnPayloadTooLong(Int)
+    case wrongOutputKeyLength(Int)
 }
 
 public enum Script {
@@ -86,6 +89,27 @@ public enum Script {
         out.append(sigWithSighashType)
         out.append(0x21) // direct-push 33 bytes
         out.append(compressedPubKey)
+        return out
+    }
+
+    /// P2TR scriptPubKey (witness version 1, BIP-341):
+    ///
+    ///   OP_1 <push 32> <x-only output key>
+    ///   0x51 0x20      ...32 bytes...
+    ///
+    /// Always exactly 34 bytes. The 32-byte output key is the
+    /// BIP-341 tweaked public key — for keypath-only spends this is
+    /// `internal_key + H_TapTweak(internal_key) · G`. For Enoch L2
+    /// post-#109, keypath-only is the standard form (no script
+    /// trees on user-money UTXOs).
+    public static func taprootScriptPubKey(outputKey: Data) throws -> Data {
+        guard outputKey.count == 32 else {
+            throw ScriptError.wrongOutputKeyLength(outputKey.count)
+        }
+        var out = Data(capacity: 34)
+        out.append(0x51) // OP_1 (witness version)
+        out.append(0x20) // direct-push 32 bytes
+        out.append(outputKey)
         return out
     }
 }

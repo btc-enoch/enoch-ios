@@ -1,13 +1,14 @@
-// Bech32 (BIP173) — pure Swift implementation.
+// Bech32 (BIP173) + Bech32m (BIP350) — pure Swift implementation.
 //
-// We deliberately do NOT cover bech32m (BIP350, segwit v1 / Taproot).
-// Enoch L2 addresses use BIP173 with HRP="enoch" and no witness
-// version byte. Bitcoin segwit-v0 addresses (bc1q.../tb1q.../bcrt1q...)
-// also use BIP173 and we accept those for cross-format wallet input.
+// The two variants are byte-for-byte identical except for the
+// checksum constant. BIP173 governs witness version 0 + Enoch's
+// pre-Taproot legacy `enoch1...` addresses; BIP350 governs witness
+// version 1+ (Taproot) + Enoch's post-#109 `enoch1p...` addresses.
 //
-// Mirrors enoch-edge/internal/address (Go) so a single set of
-// BIP173 vectors covers both implementations. Spec:
-// https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
+// Mirrors enoch-edge/internal/address (Go) so a single set of test
+// vectors covers both implementations.
+//   BIP173: https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
+//   BIP350: https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
 
 import Foundation
 
@@ -22,6 +23,21 @@ public enum Bech32 {
         case bitConversion
     }
 
+    /// Which checksum scheme to use. BIP173 (`bech32`) for witness
+    /// version 0 + legacy Enoch addresses; BIP350 (`bech32m`) for
+    /// witness version 1+ (Taproot) + post-#109 Enoch P2TR addresses.
+    public enum Variant {
+        case bech32   // BIP173, constant = 1
+        case bech32m  // BIP350, constant = 0x2bc830a3
+
+        var checksumConstant: UInt32 {
+            switch self {
+            case .bech32:  return 1
+            case .bech32m: return 0x2bc830a3
+            }
+        }
+    }
+
     // BIP173 charset; index = 5-bit value.
     private static let charset: [Character] = Array("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
 
@@ -34,22 +50,20 @@ public enum Bech32 {
         return t
     }()
 
-    // Generator polynomial coefficients (BIP173).
+    // Generator polynomial coefficients (shared by BIP173 + BIP350).
     private static let gen: [UInt32] = [
         0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3,
     ]
 
-    // BIP173 checksum constant. (BIP350 / bech32m uses 0x2bc830a3;
-    // intentionally omitted — Enoch + segwit-v0 are both BIP173.)
-    private static let checksumConst: UInt32 = 1
-
-    /// Encode an HRP + 5-bit data array as a bech32 string.
+    /// Encode an HRP + 5-bit data array as a bech32(m) string. Default
+    /// variant is BIP173 to preserve the existing call sites; pass
+    /// `.bech32m` for Taproot-era addresses.
     /// `data` MUST already be in 5-bit-per-symbol form (call
     /// `convertBits(_:from:to:pad:)` to translate from raw bytes).
-    public static func encode(hrp: String, data: [UInt8]) throws -> String {
+    public static func encode(hrp: String, data: [UInt8], variant: Variant = .bech32) throws -> String {
         let lowerHRP = hrp.lowercased()
         try validateHRPChars(lowerHRP)
-        let checksum = createChecksum(hrp: lowerHRP, data: data)
+        let checksum = createChecksum(hrp: lowerHRP, data: data, variant: variant)
         var result = lowerHRP + "1"
         for v in data + checksum {
             result.append(charset[Int(v)])
@@ -57,10 +71,39 @@ public enum Bech32 {
         return result
     }
 
-    /// Decode a bech32 string into (hrp, 5-bit data). Caller is
-    /// responsible for converting back to bytes via convertBits.
+    /// Decode a bech32(m) string into (hrp, 5-bit data, variant). The
+    /// caller learns from the returned variant whether the input was
+    /// BIP173 (witness v0 / legacy) or BIP350 (witness v1 / Taproot).
+    /// Caller is responsible for converting back to bytes via
+    /// `convertBits` and for validating that the variant matches the
+    /// witness version of the encoded payload (BIP350 requires v1+,
+    /// BIP173 requires v0).
+    public static func decodeAny(_ s: String) throws -> (hrp: String, data: [UInt8], variant: Variant) {
+        let (hrp, dataWithChecksum) = try decodeRaw(s)
+        if polymod(hrpExpand(hrp) + dataWithChecksum) == Variant.bech32.checksumConstant {
+            return (hrp, Array(dataWithChecksum.dropLast(6)), .bech32)
+        }
+        if polymod(hrpExpand(hrp) + dataWithChecksum) == Variant.bech32m.checksumConstant {
+            return (hrp, Array(dataWithChecksum.dropLast(6)), .bech32m)
+        }
+        throw Error.invalidChecksum
+    }
+
+    /// Backward-compat: decode strictly as BIP173 (the original behavior).
+    /// Existing call sites in Address.swift continue to use this.
     public static func decode(_ s: String) throws -> (hrp: String, data: [UInt8]) {
-        // BIP173 forbids mixed-case strings.
+        let (hrp, dataWithChecksum) = try decodeRaw(s)
+        if !verifyChecksum(hrp: hrp, data: dataWithChecksum, variant: .bech32) {
+            throw Error.invalidChecksum
+        }
+        // Strip the 6-symbol checksum tail from the returned data.
+        return (hrp, Array(dataWithChecksum.dropLast(6)))
+    }
+
+    /// Shared parsing for BIP173 + BIP350: validates structure, returns
+    /// (hrp, data-including-checksum). Callers verify the checksum
+    /// against the expected variant.
+    private static func decodeRaw(_ s: String) throws -> (hrp: String, data: [UInt8]) {
         let hasLower = s.contains(where: { $0.isLowercase })
         let hasUpper = s.contains(where: { $0.isUppercase })
         if hasLower && hasUpper {
@@ -73,7 +116,7 @@ public enum Bech32 {
         }
         let sepIdx = lower.distance(from: lower.startIndex, to: sepRange.lowerBound)
 
-        // BIP173: HRP is 1..83 chars, data section >= 6 (the checksum), total <= 90.
+        // HRP is 1..83 chars, data section >= 6 (the checksum), total <= 90.
         if sepIdx < 1 || sepIdx + 7 > lower.count || lower.count > 90 {
             throw Error.invalidLength
         }
@@ -93,12 +136,7 @@ public enum Bech32 {
             }
             data.append(UInt8(v))
         }
-
-        if !verifyChecksum(hrp: hrp, data: data) {
-            throw Error.invalidChecksum
-        }
-        // Strip the 6-symbol checksum tail from the returned data.
-        return (hrp, Array(data.dropLast(6)))
+        return (hrp, data)
     }
 
     /// Re-pack a byte array between bit widths (e.g. 8→5 for encoding,
@@ -171,13 +209,13 @@ public enum Bech32 {
         return out
     }
 
-    private static func verifyChecksum(hrp: String, data: [UInt8]) -> Bool {
-        return polymod(hrpExpand(hrp) + data) == checksumConst
+    private static func verifyChecksum(hrp: String, data: [UInt8], variant: Variant) -> Bool {
+        return polymod(hrpExpand(hrp) + data) == variant.checksumConstant
     }
 
-    private static func createChecksum(hrp: String, data: [UInt8]) -> [UInt8] {
+    private static func createChecksum(hrp: String, data: [UInt8], variant: Variant) -> [UInt8] {
         let values = hrpExpand(hrp) + data + [0, 0, 0, 0, 0, 0]
-        let mod = polymod(values) ^ checksumConst
+        let mod = polymod(values) ^ variant.checksumConstant
         var out = [UInt8](repeating: 0, count: 6)
         for i in 0..<6 {
             out[i] = UInt8((mod >> (5 * (5 - i))) & 31)
