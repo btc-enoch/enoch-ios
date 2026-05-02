@@ -38,11 +38,25 @@ public struct TxInput: Equatable {
     public var scriptSig: Data
     public var sequence: UInt32
 
-    public init(txHash: Data, vout: UInt32, scriptSig: Data = Data(), sequence: UInt32 = 0xFFFFFFFF) {
+    /// Witness stack for this input — empty for legacy spends
+    /// (P2PKH), non-empty for segwit (P2WPKH, P2TR keypath = single
+    /// 64-byte Schnorr sig). Each element is one push onto the
+    /// witness stack; serialized to the wire as `varint(elem_count)
+    /// + foreach elem: varint(len) + bytes` per BIP-141.
+    public var witness: [Data]
+
+    public init(
+        txHash: Data,
+        vout: UInt32,
+        scriptSig: Data = Data(),
+        sequence: UInt32 = 0xFFFFFFFF,
+        witness: [Data] = []
+    ) {
         self.txHash = txHash
         self.vout = vout
         self.scriptSig = scriptSig
         self.sequence = sequence
+        self.witness = witness
     }
 }
 
@@ -115,6 +129,12 @@ public extension Tx {
     /// malleability. Returned in NATURAL order (display order is
     /// `Data(txHash().reversed())`).
     func txHash() throws -> Data {
+        // BIP-141: txid = hash of legacy-serialized bytes (no
+        // marker/flag/witness, scriptSigs zeroed). For Taproot
+        // inputs scriptSig is already empty so witness data is
+        // structurally outside the txid commitment — that's
+        // exactly what makes Taproot txs non-malleable by witness
+        // tweaking.
         var stripped = self
         stripped.inputs = inputs.map {
             TxInput(txHash: $0.txHash, vout: $0.vout, scriptSig: Data(), sequence: $0.sequence)
@@ -273,12 +293,27 @@ public struct TxInputWire: Codable, Equatable {
     public var vout: UInt32
     public var scriptSig: String
     public var sequence: UInt32
+    /// Optional witness stack as hex strings. Omitted for legacy
+    /// (P2PKH) inputs; present (and non-empty) for segwit/Taproot
+    /// inputs. The operator's submit_tx handler reads it back into
+    /// `ledger.TxInput.Witness [][]byte` and feeds it to the
+    /// txscript engine for verification.
+    public var witness: [String]?
+
+    public init(txHash: String, vout: UInt32, scriptSig: String, sequence: UInt32, witness: [String]? = nil) {
+        self.txHash = txHash
+        self.vout = vout
+        self.scriptSig = scriptSig
+        self.sequence = sequence
+        self.witness = witness
+    }
 
     enum CodingKeys: String, CodingKey {
         case txHash = "tx_hash"
         case vout
         case scriptSig = "script_sig"
         case sequence
+        case witness
     }
 }
 
@@ -296,15 +331,18 @@ public struct TxOutputWire: Codable, Equatable {
 
 public extension Tx {
     /// Convert to the JSON wire shape POST /v1/submit_tx accepts.
+    /// `witness` is omitted from the JSON when empty (legacy P2PKH
+    /// inputs), included as an array of hex strings otherwise.
     func toWire() -> SubmitTxRequest {
         SubmitTxRequest(
             version: version,
-            inputs: inputs.map {
+            inputs: inputs.map { inp in
                 TxInputWire(
-                    txHash: $0.txHash.hexString,
-                    vout: $0.vout,
-                    scriptSig: $0.scriptSig.hexString,
-                    sequence: $0.sequence
+                    txHash: inp.txHash.hexString,
+                    vout: inp.vout,
+                    scriptSig: inp.scriptSig.hexString,
+                    sequence: inp.sequence,
+                    witness: inp.witness.isEmpty ? nil : inp.witness.map { $0.hexString }
                 )
             },
             outputs: outputs.map {
@@ -318,16 +356,19 @@ public extension Tx {
     }
 
     /// Decode an inbound wire shape (e.g. when replaying a tx body
-    /// stored in operator tx-history).
+    /// stored in operator tx-history). Witness, when present in the
+    /// JSON, is decoded element-by-element from hex.
     init(wire req: SubmitTxRequest) throws {
         self.version = req.version
         self.lockTime = req.lockTime
-        self.inputs = try req.inputs.map {
-            TxInput(
-                txHash: try Data(hex: $0.txHash),
-                vout: $0.vout,
-                scriptSig: try Data(hex: $0.scriptSig),
-                sequence: $0.sequence
+        self.inputs = try req.inputs.map { inp in
+            let witnessElements: [Data] = try (inp.witness ?? []).map { try Data(hex: $0) }
+            return TxInput(
+                txHash: try Data(hex: inp.txHash),
+                vout: inp.vout,
+                scriptSig: try Data(hex: inp.scriptSig),
+                sequence: inp.sequence,
+                witness: witnessElements
             )
         }
         self.outputs = try req.outputs.map {

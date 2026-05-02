@@ -215,6 +215,89 @@ final class TxTests: XCTestCase {
         XCTAssertTrue(s.contains("\"lock_time\""))
     }
 
+    // MARK: - Witness wire format (#109)
+
+    /// Empty witness: a legacy tx (P2PKH) emits NO `witness` key at
+    /// all in the JSON. The operator's existing tx-history will keep
+    /// parsing untouched. This is the backward-compat property —
+    /// without it, every operator deserializer would need a
+    /// pre-#109 / post-#109 schema split.
+    func testWitnessOmittedFromLegacyTxJSON() throws {
+        let legacyTx = makeFixtureTx()  // built without setting witness
+        let encoded = try JSONEncoder().encode(legacyTx.toWire())
+        let s = String(data: encoded, encoding: .utf8) ?? ""
+        XCTAssertFalse(s.contains("\"witness\""), "legacy tx must not emit witness key:\n\(s)")
+    }
+
+    /// Non-empty witness: a Taproot keypath input has a single 64-byte
+    /// Schnorr sig in its witness stack. JSON includes the witness
+    /// field as an array of hex strings; Tx(wire:) decodes it back to
+    /// the original bytes.
+    func testWitnessRoundTripsThroughJSON() throws {
+        let schnorrSig = Data((0..<64).map { UInt8($0) })
+        let inputs = [
+            TxInput(
+                txHash: Data((0..<32).map { UInt8($0) }),
+                vout: 0,
+                scriptSig: Data(),                       // empty for P2TR
+                sequence: 0xFFFFFFFE,
+                witness: [schnorrSig]
+            )
+        ]
+        let outputs = [TxOutput(amount: 100_000, scriptPubKey: Data([0x51, 0x20] + Array(repeating: UInt8(0xAB), count: 32)))]
+        let original = Tx(version: 2, inputs: inputs, outputs: outputs, lockTime: 0)
+
+        let encoded = try JSONEncoder().encode(original.toWire())
+        let s = String(data: encoded, encoding: .utf8) ?? ""
+        XCTAssertTrue(s.contains("\"witness\""), "P2TR tx must emit witness key:\n\(s)")
+
+        let decoded = try JSONDecoder().decode(SubmitTxRequest.self, from: encoded)
+        let recovered = try Tx(wire: decoded)
+        XCTAssertEqual(recovered.inputs.count, 1)
+        XCTAssertEqual(recovered.inputs[0].witness, [schnorrSig])
+        XCTAssertEqual(recovered.inputs[0].scriptSig.count, 0)
+    }
+
+    /// txHash() must NOT change when witness data is added/altered.
+    /// This is BIP-141's load-bearing property: txid commits to
+    /// scriptSig-zeroed legacy bytes, never to witness data, so
+    /// Taproot txs are non-malleable by witness tweaking.
+    func testTxHashIgnoresWitness() throws {
+        let baseInput = TxInput(txHash: Data(repeating: 0xAA, count: 32), vout: 0)
+        let outputs = [TxOutput(amount: 50_000, scriptPubKey: Data([0x6A]))]
+        let txNoWitness = Tx(version: 1, inputs: [baseInput], outputs: outputs, lockTime: 0)
+
+        var withWitness = baseInput
+        withWitness.witness = [Data(repeating: 0xBB, count: 64)]
+        let txWithWitness = Tx(version: 1, inputs: [withWitness], outputs: outputs, lockTime: 0)
+
+        XCTAssertEqual(try txNoWitness.txHash(), try txWithWitness.txHash())
+    }
+
+    /// Multi-element witness round-trip — covers e.g. tap-script
+    /// spends ([sig, leaf_script, control_block]) which we don't
+    /// emit from the wallet today but the wire format must support
+    /// (the bond's slash + reclaim spends use this shape).
+    func testWitnessMultiElementRoundTrip() throws {
+        let elem1 = Data((0..<64).map { UInt8($0) })
+        let elem2 = Data([0x20] + Array(repeating: UInt8(0x42), count: 32) + [0xAC])
+        let elem3 = Data([0xC0] + Array(repeating: UInt8(0x77), count: 32) + Array(repeating: UInt8(0x88), count: 32))
+        let inputs = [
+            TxInput(
+                txHash: Data(repeating: 0x01, count: 32),
+                vout: 0,
+                scriptSig: Data(),
+                sequence: 0xFFFFFFFE,
+                witness: [elem1, elem2, elem3]
+            )
+        ]
+        let original = Tx(version: 2, inputs: inputs, outputs: [], lockTime: 0)
+
+        let encoded = try JSONEncoder().encode(original.toWire())
+        let recovered = try Tx(wire: try JSONDecoder().decode(SubmitTxRequest.self, from: encoded))
+        XCTAssertEqual(recovered.inputs[0].witness, [elem1, elem2, elem3])
+    }
+
     // MARK: - operator gold-standard cross-check
 
     /// Real tx body pulled from a running regtest operator (alice→bob
