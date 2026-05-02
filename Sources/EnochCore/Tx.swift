@@ -188,7 +188,9 @@ public extension Tx {
     /// BIP-341 keypath sighash for input `inputIndex` under
     /// SIGHASH_DEFAULT (the standard Taproot keypath sighash type).
     ///
-    /// Algorithm — `sighash = SHA256_TapSighash(preimage)` where
+    /// Algorithm — `sighash = SHA256_TapSighash(0x00 || preimage)`
+    /// where the leading 0x00 is the BIP-341 sighash epoch byte
+    /// (always 0x00 today; reserved for future extensions) and
     /// preimage is:
     ///
     ///   hash_type      (1 byte)         0x00 for SIGHASH_DEFAULT
@@ -202,10 +204,15 @@ public extension Tx {
     ///   spend_type     (1 byte)         0x00 for keypath, no annex
     ///   input_index    (4 LE)
     ///
-    /// Total preimage = 174 bytes. Final tagged hash uses tag
-    /// "TapSighash". `prevouts.count` MUST equal `inputs.count` —
-    /// BIP-341 commits to ALL inputs' amounts + scripts, not just
-    /// the one being signed.
+    /// Total tagged-hash input = 175 bytes (1 epoch + 174 preimage).
+    /// Final tagged hash uses tag "TapSighash". `prevouts.count`
+    /// MUST equal `inputs.count` — BIP-341 commits to ALL inputs'
+    /// amounts + scripts, not just the one being signed.
+    ///
+    /// Cross-validated byte-for-byte against btcsuite's
+    /// `txscript.CalcTaprootSignatureHash`, which is what the operator
+    /// uses to verify witness sigs (see TxBIP341SighashTests parity
+    /// vector).
     func sighashBIP341Keypath(
         inputIndex: Int,
         prevouts: [Prevout]
@@ -218,6 +225,7 @@ public extension Tx {
         }
 
         var preimage = Data()
+        preimage.append(0x00)                           // sighash epoch (BIP-341)
         preimage.append(0x00)                           // hash_type = SIGHASH_DEFAULT
         preimage.appendUInt32LE(version)
         preimage.appendUInt32LE(lockTime)

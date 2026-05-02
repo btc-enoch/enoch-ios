@@ -119,4 +119,35 @@ final class TxBIP341SighashTests: XCTestCase {
             }
         }
     }
+
+    /// Cross-language parity vector. The expected sighash is what
+    /// btcsuite's `txscript.CalcTaprootSignatureHash` (operator side)
+    /// emits for this exact tx, so this pin guards the iOS sighash
+    /// against drifting from what the operator's verifier will accept.
+    ///
+    /// Vector: 1 input at txid 0x11..×32 vout 0 sequence 0xFFFFFFFE,
+    /// previous P2TR scriptPubKey at 32-byte output key 0x42..×32 with
+    /// 1_000_000 sat. 1 output of 990_000 sat at P2TR scriptPubKey for
+    /// 32-byte recipient key 0xCD..×32. Version 2, locktime 0.
+    func testKeypathSighashParityWithOperatorVector() throws {
+        let prevScript = Data([0x51, 0x20]) + Data(repeating: 0x42, count: 32)
+        let recvScript = Data([0x51, 0x20]) + Data(repeating: 0xCD, count: 32)
+        let inputs = [
+            TxInput(
+                txHash: Data(repeating: 0x11, count: 32),
+                vout: 0,
+                scriptSig: Data(),
+                sequence: 0xFFFFFFFE
+            ),
+        ]
+        let outputs = [TxOutput(amount: 990_000, scriptPubKey: recvScript)]
+        let tx = Tx(version: 2, inputs: inputs, outputs: outputs, lockTime: 0)
+        let prevouts = [Tx.Prevout(amountSatoshi: 1_000_000, scriptPubKey: prevScript)]
+
+        let got = try tx.sighashBIP341Keypath(inputIndex: 0, prevouts: prevouts)
+        // Expected: btcsuite txscript.CalcTaprootSignatureHash on the
+        // same tx (regenerated via a small Go probe; see #109 commit).
+        let expected = try Data(hex: "a886e6d4f2902e7a4bf6202906209efe3d0d8d18e99b6d4793bbdfcb4d34bb45")
+        XCTAssertEqual(got, expected)
+    }
 }
