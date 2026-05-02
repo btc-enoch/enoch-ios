@@ -40,9 +40,23 @@ public final class KeychainWalletKeystore: WalletKeystore {
         self.account = account
     }
 
-    // MARK: - createKey
+    // MARK: - createKey / importKey
 
     public func createKey() throws -> Secp256k1.PublicKey {
+        let priv = try Secp256k1.PrivateKey()
+        return try storeFreshKey(priv)
+    }
+
+    public func importKey(_ priv: Secp256k1.PrivateKey) throws -> Secp256k1.PublicKey {
+        return try storeFreshKey(priv)
+    }
+
+    /// Shared body for createKey + importKey. Both paths refuse to
+    /// overwrite an existing key (callers that want to rotate must
+    /// `delete()` first), set the same biometric ACL, and store the
+    /// pubkey alongside in the generic-attribute slot so reads don't
+    /// need to crack the biometric gate.
+    private func storeFreshKey(_ priv: Secp256k1.PrivateKey) throws -> Secp256k1.PublicKey {
         // Existence check — querying for the *attribute* (not the
         // secret) doesn't trigger a biometric prompt, so this is
         // cheap to call on every launch.
@@ -50,7 +64,6 @@ public final class KeychainWalletKeystore: WalletKeystore {
             throw WalletKeystoreError.keyAlreadyExists
         }
 
-        let priv = try Secp256k1.PrivateKey()
         let pub = priv.publicKey
         let secret = priv.rawBytes
 

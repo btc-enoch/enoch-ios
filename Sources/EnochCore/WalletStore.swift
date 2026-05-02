@@ -132,7 +132,27 @@ public final class WalletStore {
     public func createWallet() async throws {
         let pub = try keystore.createKey()
         self.pubkey = pub
-        self.address = try Address.encodeEnoch(publicKey: pub)
+        self.address = try Self.taprootAddress(for: pub)
+        await refresh()
+        startEventLoop()
+    }
+
+    /// Import an existing wallet from a 32-byte hex private key.
+    /// Same lifecycle as `createWallet` once the key is loaded —
+    /// derive the Taproot address, refresh state (so any pre-existing
+    /// UTXOs at this address show up immediately), start the SSE
+    /// event loop. Throws on invalid hex / wrong length / out-of-range
+    /// scalar / a wallet already being present.
+    public func importWallet(privateKeyHex: String) async throws {
+        let trimmed = privateKeyHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = try Data(hex: trimmed)
+        guard raw.count == 32 else {
+            throw WalletKeystoreError.unhandledStatus(0)
+        }
+        let priv = try Secp256k1.PrivateKey(rawBytes: raw)
+        let pub = try keystore.importKey(priv)
+        self.pubkey = pub
+        self.address = try Self.taprootAddress(for: pub)
         await refresh()
         startEventLoop()
     }

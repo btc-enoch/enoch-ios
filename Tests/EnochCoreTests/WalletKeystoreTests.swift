@@ -37,6 +37,64 @@ final class WalletKeystoreTests: XCTestCase {
         }
     }
 
+    /// importKey adopts an externally-supplied privkey AND publicKey()
+    /// then returns the matching pub bytes. Round-trips a known key
+    /// (the d47e4d8a… vector from the regtest "send to a key without a
+    /// wallet" demo) so a regression in the import path fails here
+    /// rather than only at runtime when a user pastes their key.
+    func testImportKeyAdoptsExternalKey() throws {
+        let ks = InMemoryWalletKeystore()
+        let raw = try Data(hex: "d47e4d8aa429fe7e8a24d1b806cc3562c0e88d88ed31d270844a08fa69eed382")
+        let priv = try Secp256k1.PrivateKey(rawBytes: raw)
+        let imported = try ks.importKey(priv)
+        let loaded = try XCTUnwrap(try ks.publicKey())
+        XCTAssertEqual(imported.compressedBytes, loaded.compressedBytes)
+        // The pubkey must match what's derivable directly from the
+        // privkey we passed in — proves the keystore stored exactly
+        // what the caller handed it (no silent rotation).
+        XCTAssertEqual(imported.compressedBytes, priv.publicKey.compressedBytes)
+    }
+
+    /// importKey enforces the same overwrite-safety contract as
+    /// createKey — no silent replacement of a funded wallet.
+    func testImportKeyTwiceFails() throws {
+        let ks = InMemoryWalletKeystore()
+        let priv = try Secp256k1.PrivateKey()
+        _ = try ks.importKey(priv)
+        XCTAssertThrowsError(try ks.importKey(priv)) { err in
+            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
+        }
+    }
+
+    /// importKey-then-create must also fail (the keystore is full,
+    /// regardless of which path filled it). And vice versa.
+    func testImportAndCreateAreMutuallyExclusive() throws {
+        let ks1 = InMemoryWalletKeystore()
+        _ = try ks1.createKey()
+        XCTAssertThrowsError(try ks1.importKey(Secp256k1.PrivateKey())) { err in
+            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
+        }
+
+        let ks2 = InMemoryWalletKeystore()
+        _ = try ks2.importKey(try Secp256k1.PrivateKey())
+        XCTAssertThrowsError(try ks2.createKey()) { err in
+            XCTAssertEqual(err as? WalletKeystoreError, .keyAlreadyExists)
+        }
+    }
+
+    /// An imported key signs and the resulting sig validates under
+    /// the imported pub. End-to-end check that import didn't quietly
+    /// corrupt the privkey on the way through Keychain (or the
+    /// in-memory shim).
+    func testImportedKeySigns() async throws {
+        let ks = InMemoryWalletKeystore()
+        let priv = try Secp256k1.PrivateKey()
+        let pub = try ks.importKey(priv)
+        let digest = Data(repeating: 0x77, count: 32)
+        let sig = try await ks.sign(digest: digest, prompt: "test")
+        XCTAssertTrue(pub.verifyDigest(digest, signature: sig))
+    }
+
     /// Sign then locally verify against the published public key.
     /// Proves the keystore-stored privkey actually matches the
     /// pubkey it advertised at create time.

@@ -1,9 +1,11 @@
-// OnboardingView — first-launch screen. Single big "Create wallet"
-// button generates the secp256k1 keypair, stores it in the Keychain
-// (Face ID required from this point forward), and lands us on Home.
+// OnboardingView — first-launch screen. Two paths:
+//   - "Create wallet" generates a fresh secp256k1 keypair and stores
+//     it Keychain-backed.
+//   - "I have an existing key" opens an import sheet that takes a
+//     64-character hex private key and adopts it as the wallet's key.
 //
-// Restore-from-seed and HD derivation are out of scope for the PoC;
-// this is the simplest path that gets a user transacting on Enoch.
+// Both land on Home. Restore-from-seed (BIP-39) is a follow-on and
+// will live alongside import-by-hex.
 
 import SwiftUI
 import EnochCore
@@ -12,6 +14,7 @@ struct OnboardingView: View {
     @Environment(\.wallet) private var wallet
     @State private var creating = false
     @State private var error: String?
+    @State private var showingImport = false
 
     var body: some View {
         VStack(spacing: 32) {
@@ -37,15 +40,23 @@ struct OnboardingView: View {
 
             Spacer()
 
-            Button {
-                Task { await create() }
-            } label: {
-                Text(creating ? "Creating…" : "Create wallet")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 44)
+            VStack(spacing: 12) {
+                Button {
+                    Task { await create() }
+                } label: {
+                    Text(creating ? "Creating…" : "Create wallet")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(creating)
+
+                Button("I have an existing key") {
+                    showingImport = true
+                }
+                .font(.subheadline)
+                .disabled(creating)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(creating)
             .padding(.horizontal)
 
             if let error {
@@ -56,6 +67,9 @@ struct OnboardingView: View {
             }
         }
         .padding(.bottom, 32)
+        .sheet(isPresented: $showingImport) {
+            ImportKeyView()
+        }
     }
 
     private func create() async {
@@ -66,6 +80,84 @@ struct OnboardingView: View {
             try await wallet.createWallet()
         } catch {
             self.error = "couldn't create wallet: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// ImportKeyView — paste a 64-char hex private key and adopt it.
+///
+/// Intentionally minimal: a monospaced text field, a one-line warning
+/// about clipboard exposure, and a single import button. Hex import
+/// is a power-user feature; the eventual mainstream restore path is
+/// BIP-39 mnemonic and will live in a separate sheet with its own UX.
+private struct ImportKeyView: View {
+    @Environment(\.wallet) private var wallet
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var hex: String = ""
+    @State private var importing = false
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Private key (64 hex characters)") {
+                    TextField("d47e4d8a…", text: $hex, axis: .vertical)
+                        .autocorrectionDisabled()
+                        .font(.callout.monospaced())
+                        .lineLimit(2...4)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                }
+
+                Section {
+                    Text("This is the raw 32-byte secret. Keys typed or pasted here may briefly live on your clipboard — paste from a trusted source only.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error {
+                    Section {
+                        Text(error)
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Import wallet")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(importing)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(importing ? "Importing…" : "Import") {
+                        Task { await runImport() }
+                    }
+                    .disabled(!isValidHex || importing)
+                }
+            }
+        }
+    }
+
+    private var isValidHex: Bool {
+        let trimmed = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 64 else { return false }
+        return trimmed.allSatisfy { $0.isHexDigit }
+    }
+
+    private func runImport() async {
+        importing = true
+        defer { importing = false }
+        error = nil
+        do {
+            try await wallet.importWallet(privateKeyHex: hex)
+            dismiss()
+        } catch {
+            self.error = "import failed: \(error.localizedDescription)"
         }
     }
 }

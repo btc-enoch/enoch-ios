@@ -41,6 +41,16 @@ public protocol WalletKeystore {
     /// programmer bug can't accidentally rotate funds away.
     func createKey() throws -> Secp256k1.PublicKey
 
+    /// Import an externally-supplied Secp256k1 key and store it.
+    /// Same overwrite-safety contract as `createKey`: throws
+    /// `.keyAlreadyExists` if a key is already present.
+    ///
+    /// Used by the "I already have a wallet" / restore flows — the
+    /// caller has the raw 32-byte secret from somewhere external
+    /// (typed hex, BIP-39 derivation, claim-link, etc.) and asks the
+    /// keystore to take ownership. Same biometric ACL as createKey.
+    func importKey(_ priv: Secp256k1.PrivateKey) throws -> Secp256k1.PublicKey
+
     /// Return the public key without prompting biometric. Pubkey is
     /// not biometrically gated — only the *signing* operation is.
     /// Returns nil if no key has been created.
@@ -84,6 +94,12 @@ public final class InMemoryWalletKeystore: WalletKeystore {
         let k = try Secp256k1.PrivateKey()
         key = k
         return k.publicKey
+    }
+
+    public func importKey(_ priv: Secp256k1.PrivateKey) throws -> Secp256k1.PublicKey {
+        if key != nil { throw WalletKeystoreError.keyAlreadyExists }
+        key = priv
+        return priv.publicKey
     }
 
     public func publicKey() throws -> Secp256k1.PublicKey? {
