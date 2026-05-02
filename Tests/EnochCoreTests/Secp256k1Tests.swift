@@ -258,4 +258,18 @@ final class Secp256k1Tests: XCTestCase {
         let bobOut   = try bob.taprootOutputKey()
         XCTAssertNotEqual(aliceOut.bytes, bobOut.bytes)
     }
+
+    /// Pubkey-only output-key derivation must produce byte-identical
+    /// output to the privkey-side path. This is the load-bearing
+    /// property that lets the wallet render its receive address
+    /// without unlocking the keystore (no biometric prompt at app
+    /// launch). If these diverged, the receive address shown in
+    /// onboarding would NOT match the address the user actually
+    /// signs from — funds would land somewhere unrecoverable.
+    func testPublicKeySideOutputKeyMatchesPrivateKeySide() throws {
+        let priv = try Secp256k1.PrivateKey()
+        let fromPriv = try priv.taprootOutputKey()
+        let fromPub  = try priv.publicKey.taprootOutputKey()
+        XCTAssertEqual(fromPriv.bytes, fromPub.bytes)
+    }
 }

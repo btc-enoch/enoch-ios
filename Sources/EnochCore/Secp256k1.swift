@@ -285,6 +285,38 @@ public enum Secp256k1 {
 
 // MARK: - PrivateKey + PublicKey: Taproot keypath helpers
 
+public extension Secp256k1.PublicKey {
+    /// Pubkey-only path to the BIP-341 keypath output key. Same
+    /// result as `Secp256k1.PrivateKey.taprootOutputKey()` but
+    /// doesn't require unlocking the privkey via biometric — usable
+    /// for rendering the wallet's receive address on app launch
+    /// without prompting for Face ID.
+    ///
+    /// Internally calls libsecp's `secp256k1_xonly_pubkey_tweak_add`
+    /// (via P256K.Schnorr.XonlyKey.add), which lifts the internal
+    /// pubkey to even-Y per BIP-340 and applies the tap-tweak. The
+    /// resulting x-only output key is byte-identical to what the
+    /// privkey-side path produces.
+    func taprootOutputKey() throws -> Secp256k1.XOnlyPublicKey {
+        let internalXOnly = try Secp256k1.XOnlyPublicKey.from(compressed: compressedBytes)
+        let tweak = try Secp256k1.taprootKeypathTweak(internalXOnly: internalXOnly.bytes)
+        do {
+            // keyParity: 0 selects the even-Y lift, matching BIP-340's
+            // "implicit even Y" convention. The Schnorr+Tweak helper
+            // verifies tweak consistency internally, so a wrong-parity
+            // call would surface as a thrown error rather than a
+            // silently-mis-tweaked output key.
+            let xonly = P256K.Schnorr.XonlyKey(dataRepresentation: internalXOnly.bytes, keyParity: 0)
+            let tweaked = try xonly.add([UInt8](tweak))
+            return try Secp256k1.XOnlyPublicKey(bytes: Data(tweaked.bytes))
+        } catch let e as secp256k1Error {
+            throw Secp256k1.Error.invalidPublicKey(e)
+        } catch {
+            throw Secp256k1.Error.invalidPublicKey(error)
+        }
+    }
+}
+
 public extension Secp256k1.PrivateKey {
     /// Returns the BIP-341 keypath-tweaked private key — the scalar
     /// the wallet signs with for a P2TR keypath spend. Internally
