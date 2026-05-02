@@ -51,6 +51,17 @@ public protocol WalletKeystore {
     /// `prompt` is the user-facing string ("Authorize send", etc.).
     func sign(digest: Data, prompt: String) async throws -> Secp256k1.Signature
 
+    /// Sign a BIP-341 keypath sighash with the **Taproot-tweaked**
+    /// private key, returning a 64-byte BIP-340 Schnorr signature.
+    /// Used by L2 P2TR keypath spends post-#109.
+    ///
+    /// The keystore loads the raw privkey, applies the BIP-341
+    /// keypath tweak, and signs in one operation — the raw privkey
+    /// doesn't leave the keystore boundary, only the (already
+    /// tweak-derived) signature does. Same biometric-prompt UX as
+    /// `sign(digest:prompt:)`.
+    func signTaprootKeypath(digest: Data, prompt: String) async throws -> Secp256k1.SchnorrSignature
+
     /// Wipe the stored key. Used for "reset wallet" flows; on a
     /// freshly-installed app the keystore is already empty so this
     /// is a no-op.
@@ -84,7 +95,21 @@ public final class InMemoryWalletKeystore: WalletKeystore {
         return try k.signDigest(digest)
     }
 
+    public func signTaprootKeypath(digest: Data, prompt _: String) async throws -> Secp256k1.SchnorrSignature {
+        guard let k = key else { throw WalletKeystoreError.keyNotFound }
+        let tweaked = try k.taprootKeypathTweaked()
+        return try Secp256k1.schnorrSign(digest: digest, privKey: tweaked)
+    }
+
     public func delete() throws {
         key = nil
+    }
+
+    /// Test-only seam: pre-load a known privkey. Lets test code
+    /// cross-check signatures against the corresponding pubkey
+    /// without going through random generation. NOT exposed via
+    /// the protocol — production wallets always generate fresh.
+    internal func _setPrivateKeyForTesting(_ priv: Secp256k1.PrivateKey) {
+        self.key = priv
     }
 }

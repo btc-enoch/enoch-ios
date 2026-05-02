@@ -134,7 +134,29 @@ public final class KeychainWalletKeystore: WalletKeystore {
         }.value
     }
 
+    public func signTaprootKeypath(digest: Data, prompt: String) async throws -> Secp256k1.SchnorrSignature {
+        try await Task.detached(priority: .userInitiated) {
+            try self.signTaprootKeypathSync(digest: digest, prompt: prompt)
+        }.value
+    }
+
+    private func signTaprootKeypathSync(digest: Data, prompt: String) throws -> Secp256k1.SchnorrSignature {
+        let key = try loadPrivateKeyWithBiometric(prompt: prompt)
+        let tweaked = try key.taprootKeypathTweaked()
+        return try Secp256k1.schnorrSign(digest: digest, privKey: tweaked)
+    }
+
     private func signSync(digest: Data, prompt: String) throws -> Secp256k1.Signature {
+        let key = try loadPrivateKeyWithBiometric(prompt: prompt)
+        return try key.signDigest(digest)
+    }
+
+    /// Shared Keychain fetch path used by both ECDSA `sign` and
+    /// Schnorr `signTaprootKeypath`. Issues the biometric prompt,
+    /// returns the freshly-loaded `Secp256k1.PrivateKey`. Caller
+    /// performs whatever signing operation (ECDSA, Schnorr, or
+    /// Schnorr-with-tweak) the spend type requires.
+    private func loadPrivateKeyWithBiometric(prompt: String) throws -> Secp256k1.PrivateKey {
         var query: [String: Any] = [
             kSecClass as String:        kSecClassGenericPassword,
             kSecAttrService as String:  service,
@@ -162,8 +184,7 @@ public final class KeychainWalletKeystore: WalletKeystore {
         guard let bytes = result as? Data, bytes.count == 32 else {
             throw WalletKeystoreError.malformedStoredKey
         }
-        let key = try Secp256k1.PrivateKey(rawBytes: bytes)
-        return try key.signDigest(digest)
+        return try Secp256k1.PrivateKey(rawBytes: bytes)
     }
 
     // MARK: - delete
