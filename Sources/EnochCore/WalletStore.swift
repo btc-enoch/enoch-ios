@@ -225,6 +225,15 @@ public final class WalletStore {
             lastError = "load keystore: \(error.localizedDescription)"
         }
         if hasWallet {
+            // Pending-deposit pills are SSE-driven (#108): the
+            // operator emits `deposit_pending` each watcher tick
+            // while a deposit is in flight + a single
+            // `deposit_minted` when the mint applies. If the wallet
+            // was offline at the moment the mint event fired, the
+            // entry would otherwise stick around stale. Clearing on
+            // bootstrap and trusting SSE to repopulate within ~5s
+            // is the simplest reconciliation.
+            pendingDeposits.removeAll()
             await refresh()
             startEventLoop()
         }
