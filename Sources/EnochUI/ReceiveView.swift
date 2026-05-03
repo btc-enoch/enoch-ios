@@ -3,14 +3,9 @@
 // it does NOT trigger Face ID (the Keychain pubkey lookup uses
 // kSecReturnAttributes only).
 //
-// Two sections coexist (#108):
-//   - "Receive on Enoch" — the wallet's L2 enoch1p... address, used
-//     by other Enoch users for instant transfers.
-//   - "Receive on Bitcoin" — the user's per-user-derived L1 deposit
-//     address (bech32m P2TR). Anyone can send BTC here; it arrives
-//     on Enoch after L1 confirmation + bridge mint. Only present
-//     when /v1/info exposes `bridge_redeem_script` and the active
-//     wallet is P2TR.
+// L1 deposit (Bitcoin → Enoch) lives in DepositView, accessed from
+// the Home screen action row. Receive is L2-only — keeps this
+// screen focused on the "instant" Enoch path.
 //
 // QR generation uses CoreImage's CIQRCodeGenerator — no third-party
 // dependency, works offline.
@@ -29,74 +24,40 @@ import CoreImage.CIFilterBuiltins
 
 struct ReceiveView: View {
     @Environment(\.wallet) private var wallet
+    @State private var copied = false
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 32) {
-                if let address = wallet.address {
-                    AddressSection(
-                        title: "Receive on Enoch",
-                        subtitle: "Instant — sender pays the L2 fee",
-                        address: address
-                    )
+        VStack(spacing: 24) {
+            if let address = wallet.address {
+                QRCode(text: address)
+                    .frame(width: 220, height: 220)
 
-                    if let depositAddress = wallet.bridgeDepositAddress {
-                        Divider().padding(.horizontal, 40)
-                        AddressSection(
-                            title: "Receive on Bitcoin",
-                            subtitle: "Bitcoin sent here arrives on Enoch after L1 confirmation",
-                            address: depositAddress
-                        )
-                    }
-                } else {
-                    ProgressView("Loading address…")
+                Text("Your Enoch address")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Text(address)
+                    .font(.callout.monospaced())
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                    .textSelection(.enabled)
+
+                Button {
+                    copyToPasteboard(address)
+                } label: {
+                    Label(copied ? "Copied" : "Copy address",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
+                .buttonStyle(.bordered)
+            } else {
+                ProgressView("Loading address…")
             }
-            .padding(.vertical)
         }
+        .padding()
         .navigationTitle("Receive")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-    }
-}
-
-private struct AddressSection: View {
-    let title: String
-    let subtitle: String
-    let address: String
-
-    @State private var copied = false
-
-    var body: some View {
-        VStack(spacing: 16) {
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-
-            QRCode(text: address)
-                .frame(width: 200, height: 200)
-
-            Text(address)
-                .font(.callout.monospaced())
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
-                .textSelection(.enabled)
-
-            Button {
-                copyToPasteboard(address)
-            } label: {
-                Label(copied ? "Copied" : "Copy address",
-                      systemImage: copied ? "checkmark" : "doc.on.doc")
-            }
-            .buttonStyle(.bordered)
-        }
     }
 
     private func copyToPasteboard(_ s: String) {

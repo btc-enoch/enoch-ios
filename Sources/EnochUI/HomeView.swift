@@ -147,7 +147,7 @@ private struct PendingDepositRow: View {
 
 private struct ActionRow: View {
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             NavigationLink {
                 ReceiveView()
             } label: {
@@ -157,6 +157,12 @@ private struct ActionRow: View {
                 SendView()
             } label: {
                 ActionButtonLabel(title: "Send", systemImage: "arrow.up.right")
+            }
+            NavigationLink {
+                DepositView()
+            } label: {
+                ActionButtonLabel(title: "Deposit",
+                                  systemImage: "bitcoinsign.circle")
             }
             NavigationLink {
                 WithdrawView()
