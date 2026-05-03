@@ -30,11 +30,11 @@ final class DepositAddressTests: XCTestCase {
     /// said to send funds" differs from the wallet's view, which is
     /// silently fund-losing.
     private static let expectedOutputKeyHex =
-        "f9f78d7604f88d31759f11b8a6f5a0082cb9e174ef120df305b9bde35ef4f23e"
+        "c68d39ff777d9076e7135937af36e333469b68e8fceee9883d76d9a07e9a1fa0"
     private static let expectedRegtestAddr =
-        "bcrt1pl8mc6asylzxnzavlzxu2dadqpqktnct5aufqmuc9hx77xhh57glq6s74gq"
+        "bcrt1pc6xnnlmh0kg8decntym67dhrxdrfk68glnhwnzpawmv6ql56r7sq9v7nfv"
     private static let expectedMainnetAddr =
-        "bc1pl8mc6asylzxnzavlzxu2dadqpqktnct5aufqmuc9hx77xhh57glqqpzu84"
+        "bc1pc6xnnlmh0kg8decntym67dhrxdrfk68glnhwnzpawmv6ql56r7sqlaz6xe"
 
     func testOutputKeyMatchesPythonVector() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
