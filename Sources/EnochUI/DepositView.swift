@@ -53,6 +53,13 @@ struct DepositView: View {
                         title: "Same address every time",
                         text: "This address is unique to your wallet and stays the same. Reusing it across multiple deposits is fine."
                     )
+
+                    InfoBlock(
+                        symbol: "exclamationmark.triangle.fill",
+                        title: "Bitcoin only",
+                        text: "Send Bitcoin to this address — never an Enoch transaction. An Enoch send to this address would be permanently unrecoverable. Use the Receive screen for Enoch transfers.",
+                        tint: .orange
+                    )
                 } else if wallet.address == nil {
                     ProgressView("Loading wallet…")
                         .padding(.vertical, 60)
@@ -124,15 +131,18 @@ private struct InfoBlock: View {
     let symbol: String
     let title: String
     let text: String
+    var tint: Color? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: symbol)
                 .font(.title3)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(tint ?? .secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.subheadline.weight(.semibold))
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(tint ?? .primary)
                 Text(text)
                     .font(.callout)
                     .foregroundStyle(.secondary)

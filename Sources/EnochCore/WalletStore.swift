@@ -129,6 +129,35 @@ public final class WalletStore {
         )
     }
 
+    /// The 32-byte x-only output key embedded in the wallet's L1
+    /// deposit address. Same bytes as the bech32m payload of
+    /// `bridgeDepositAddress`, exposed separately so SendView can
+    /// detect "user is about to send L2 funds to their own deposit
+    /// address" without re-parsing the address string. Mathematically
+    /// the deposit output_key is `NUMS + tweak·G` — no one has the
+    /// privkey for it under the current construction, so an L2 send
+    /// to it produces a permanently-stuck UTXO.
+    public var bridgeDepositOutputKey: Data? {
+        guard
+            let l2Address = address,
+            let info = operatorInfo,
+            let redeem = info.bridgeRedeemScript
+        else { return nil }
+        guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
+            return nil
+        }
+        let redeemBytes: Data
+        do {
+            redeemBytes = try Data(hex: redeem)
+        } catch {
+            return nil
+        }
+        return try? DepositAddress.outputKey(
+            l2XOnly: outputKey,
+            bridgeRedeemScript: redeemBytes
+        )
+    }
+
     /// Wallet-facing lifecycle states. Mapped from the operator's
     /// finer state machine; the wallet only needs three buckets to
     /// render UX. Future server states (e.g. "confirmed" once an

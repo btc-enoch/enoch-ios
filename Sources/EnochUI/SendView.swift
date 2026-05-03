@@ -107,9 +107,22 @@ struct SendView: View {
         guard !trimmed.isEmpty else { return nil }
         do {
             switch try Address.decode(trimmed) {
-            case .p2pkh, .p2tr:
-                // Both L2 forms — legacy enoch1... and post-#109
-                // enoch1p... — are valid Send recipients.
+            case .p2pkh:
+                return nil
+            case .p2tr(let outputKey):
+                // #108 self-deposit guard: refuse a send whose target
+                // is the L2-form of THIS wallet's L1 deposit address.
+                // The deposit output_key is NUMS + tweak·G — no one
+                // has the privkey for it, so an L2 send to it
+                // produces a permanently-stuck UTXO. Block before
+                // submission rather than relying on the user to
+                // notice. Foreign deposit addresses can't be
+                // detected client-side without an operator query —
+                // if/when we add that, the same branch widens.
+                if let depositKey = wallet.bridgeDepositOutputKey,
+                   outputKey == depositKey {
+                    return "That's your Bitcoin deposit address — Enoch sends to it would be unrecoverable. Share your enoch1p… address from Receive instead."
+                }
                 return nil
             case .p2wpkh:
                 // Bitcoin segwit v0 isn't an L2 address. The wallet's
