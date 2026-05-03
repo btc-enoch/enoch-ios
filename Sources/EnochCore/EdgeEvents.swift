@@ -24,6 +24,8 @@ public struct EdgeEvent: Equatable {
         case txApplied            // tx_applied
         case stateRootSigned      // state_root_signed
         case withdrawalStatus     // withdrawal_status — peg-out lifecycle event
+        case depositPending       // deposit_pending — L1 deposit seen, awaiting mint (#108)
+        case depositMinted        // deposit_minted — mint applied, clear pending (#108)
         case unknown
     }
     public let kind: Kind
@@ -35,6 +37,8 @@ public struct EdgeEvent: Equatable {
         case "tx_applied":         kind = .txApplied
         case "state_root_signed":  kind = .stateRootSigned
         case "withdrawal_status":  kind = .withdrawalStatus
+        case "deposit_pending":    kind = .depositPending
+        case "deposit_minted":     kind = .depositMinted
         default:                   kind = .unknown
         }
         return EdgeEvent(kind: kind, raw: data)
@@ -96,6 +100,55 @@ public struct WithdrawalStatusPayload: Codable, Equatable {
     }
 }
 
+/// Per-user L1 deposit lifecycle — see operator's
+/// events.DepositPendingData (#108). `confirmations` advances each
+/// watcher tick toward the agent's signing threshold (mainnet=6,
+/// testnet=3, regtest=1) so wallets can render a "3/6 confs"
+/// progress pill without polling.
+///
+/// `recipient` matches the wallet's L2 enoch1p... address; the
+/// edge filter already restricts the stream to events for the
+/// wallet's address, but consumers should still match by recipient
+/// before rendering UI to be safe.
+public struct DepositPendingPayload: Codable, Equatable {
+    public let recipient: String
+    public let btcTxID: String
+    public let vout: UInt32
+    public let amountSatoshi: UInt64
+    public let confirmations: Int
+    public let bitcoinHeight: UInt64
+    public let perUser: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case recipient
+        case btcTxID = "btc_txid"
+        case vout
+        case amountSatoshi = "amount_satoshi"
+        case confirmations
+        case bitcoinHeight = "bitcoin_height"
+        case perUser = "per_user"
+    }
+}
+
+/// Mint applied — the matching `deposit_pending` entry can be
+/// cleared by `btcTxID`. `l2TxHash` cross-references the mint
+/// into the wallet's address-history view.
+public struct DepositMintedPayload: Codable, Equatable {
+    public let recipient: String
+    public let btcTxID: String
+    public let vout: UInt32
+    public let amountSatoshi: UInt64
+    public let l2TxHash: String
+
+    enum CodingKeys: String, CodingKey {
+        case recipient
+        case btcTxID = "btc_txid"
+        case vout
+        case amountSatoshi = "amount_satoshi"
+        case l2TxHash = "l2_tx_hash"
+    }
+}
+
 public extension EdgeEvent {
     /// Returns nil on shape mismatch — wallets typically `if let`
     /// rather than try/catch in event handling.
@@ -109,6 +162,14 @@ public extension EdgeEvent {
 
     func asWithdrawalStatus() -> WithdrawalStatusPayload? {
         try? JSONDecoder().decode(WithdrawalStatusPayload.self, from: raw)
+    }
+
+    func asDepositPending() -> DepositPendingPayload? {
+        try? JSONDecoder().decode(DepositPendingPayload.self, from: raw)
+    }
+
+    func asDepositMinted() -> DepositMintedPayload? {
+        try? JSONDecoder().decode(DepositMintedPayload.self, from: raw)
     }
 }
 

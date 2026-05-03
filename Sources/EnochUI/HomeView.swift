@@ -17,6 +17,13 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 BalanceCard(balance: wallet.balance, utxoCount: wallet.utxoCount)
+                if !wallet.pendingDeposits.isEmpty {
+                    PendingDepositsCard(
+                        deposits: wallet.pendingDeposits.values
+                            .sorted { $0.btcTxID < $1.btcTxID },
+                        targetConfirmations: wallet.minConfirmationsForDeposit
+                    )
+                }
                 ActionRow()
                 RecentActivity(history: Array(wallet.history.prefix(5)),
                                totalCount: wallet.history.count,
@@ -73,6 +80,68 @@ private struct BalanceCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+/// Home-screen card for in-flight L1 deposits at the user's
+/// per-user address (#108). Each entry advances toward the
+/// network's mint threshold (`targetConfirmations`); once the mint
+/// applies the operator emits `deposit_minted` and the WalletStore
+/// removes the entry, so this card disappears in the same SSE turn
+/// the new UTXO appears in history.
+private struct PendingDepositsCard: View {
+    let deposits: [WalletStore.PendingDepositUI]
+    let targetConfirmations: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "bitcoinsign.circle.fill")
+                    .foregroundStyle(.orange)
+                Text("Receiving from Bitcoin")
+                    .font(.subheadline.weight(.semibold))
+            }
+            ForEach(deposits, id: \.btcTxID) { d in
+                PendingDepositRow(deposit: d, target: targetConfirmations)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct PendingDepositRow: View {
+    let deposit: WalletStore.PendingDepositUI
+    let target: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView(value: progress)
+                .progressViewStyle(.circular)
+                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(formatSatoshis(deposit.amountSatoshi))
+                    .font(.callout.weight(.semibold))
+                    .monospacedDigit()
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    private var progress: Double {
+        guard target > 0 else { return 1 }
+        return min(1, Double(deposit.confirmations) / Double(target))
+    }
+
+    private var statusText: String {
+        if deposit.confirmations >= target {
+            return "Crediting…"
+        }
+        return "\(deposit.confirmations)/\(target) confirmations"
     }
 }
 

@@ -54,11 +54,48 @@ public final class WalletStore {
     /// <txid>" badges on burn rows.
     public private(set) var withdrawalStatuses: [String: WithdrawalUIStatus] = [:]
 
+    /// In-flight L1 deposits at the wallet's per-user address (#108).
+    /// Keyed by `btc_txid` so re-emitted `deposit_pending` events
+    /// just update the existing entry's confirmation count.
+    /// Cleared on the matching `deposit_minted` event — at that
+    /// point the L2 balance has already updated through `tx_applied`,
+    /// so the home-screen pill disappears at the same moment the
+    /// new UTXO appears in history.
+    public private(set) var pendingDeposits: [String: PendingDepositUI] = [:]
+
+    /// Wallet-side view of an in-flight L1 deposit. Uses `Int` for
+    /// `confirmations` because the wire shape is signed (the operator
+    /// caps at zero so the UI never has to deal with negatives, but
+    /// we keep the type honest).
+    public struct PendingDepositUI: Equatable {
+        public let btcTxID: String
+        public let vout: UInt32
+        public let amountSatoshi: UInt64
+        public let confirmations: Int
+        public let perUser: Bool
+    }
+
     /// Convenience: the operator's flat per-tx L2 fee, or nil if
     /// `/v1/info` hasn't been fetched yet. SendView reads this to
     /// preview the fee before the user confirms.
     public var feePerTxSatoshi: UInt64? {
         operatorInfo?.feeSchedule?.perTxFeeSatoshi
+    }
+
+    /// Bitcoin confirmations the bridge agents wait for before
+    /// signing a mint, mirroring the per-network threshold in the
+    /// agent's DepositVerifier (mainnet=6 for cascade-zero finality,
+    /// testnet=3, regtest=1). Used to render the progress
+    /// denominator on the home-screen pending-deposit pill.
+    /// Defaults to 1 when `/v1/info` hasn't loaded yet — the wallet
+    /// gracefully renders "N/1" until the operator's network is
+    /// known, then redraws.
+    public var minConfirmationsForDeposit: Int {
+        switch operatorInfo?.network {
+        case "mainnet": return 6
+        case "testnet", "testnet3", "signet": return 3
+        default: return 1
+        }
     }
 
     /// The wallet's per-user L1 Bitcoin deposit address (#108) — a
@@ -396,6 +433,27 @@ public final class WalletStore {
                 default:
                     withdrawalStatuses[payload.burnTxHash] = .unknownState(payload.status)
                 }
+            }
+        case .depositPending:
+            // L1 deposit detected at our per-user address; mint
+            // hasn't applied yet. Re-emitted on each watcher tick so
+            // the confirmation count advances toward the agent's
+            // signing threshold — last write wins by design.
+            if let payload = event.asDepositPending(), payload.recipient == address {
+                pendingDeposits[payload.btcTxID] = PendingDepositUI(
+                    btcTxID: payload.btcTxID,
+                    vout: payload.vout,
+                    amountSatoshi: payload.amountSatoshi,
+                    confirmations: payload.confirmations,
+                    perUser: payload.perUser
+                )
+            }
+        case .depositMinted:
+            // Mint applied — clear the pending pill. The matching
+            // tx_applied that arrives on the same SSE turn will
+            // refresh balance + history.
+            if let payload = event.asDepositMinted(), payload.recipient == address {
+                pendingDeposits.removeValue(forKey: payload.btcTxID)
             }
         case .unknown:
             break
