@@ -39,29 +39,73 @@ public final class WalletStore {
     public var hasWallet: Bool { address != nil }
 
     // MARK: - Live state
+    //
+    // Per-wallet state is keyed by wallet id rather than held as flat
+    // properties. Computed accessors below project the active wallet's
+    // entry, so views can keep reading `wallet.balance` etc. without
+    // knowing about the dict. Switching wallets changes
+    // `activeWalletID`; the previous wallet's state object stays in
+    // the dict so a switch-back doesn't flash a fresh-zero balance
+    // through the UI before refresh lands. Crucially this makes
+    // cross-wallet leaks structurally impossible: an SSE event keyed
+    // by recipient cannot land in a different wallet's slot, because
+    // there is no shared slot.
 
-    public private(set) var balance: UInt64 = 0
-    public private(set) var utxoCount: Int = 0
-    public private(set) var history: [AddressHistoryEntry] = []
+    /// Per-wallet live state, keyed by wallet id. Mutated in place by
+    /// `updateActive` / `updateState(walletID:)`. Public for tests +
+    /// hypothetical multi-wallet UI that wants to peek at a non-active
+    /// wallet's state.
+    public private(set) var states: [String: WalletLiveState] = [:]
+
+    /// Network-shared snapshot of the operator's fee oracle. Not
+    /// per-wallet because every wallet on this operator pays the same
+    /// rate.
     public private(set) var feeRates: FeeRates?
+
+    /// Network-shared operator metadata (network, fee schedule,
+    /// bridge redeem script, min_deposit_confirmations, …).
     public private(set) var operatorInfo: OperatorInfo?
 
-    /// Per-burn lifecycle status, keyed by burn_tx_hash (matches the
-    /// tx_hash on history rows where role = .burn). Populated from
-    /// /v1/pending_withdrawals on refresh + updated from
-    /// withdrawal_status SSE events. Wallet UI looks up entries here
-    /// to render "Pending bridge confirmation" → "Sent to Bitcoin:
-    /// <txid>" badges on burn rows.
-    public private(set) var withdrawalStatuses: [String: WithdrawalUIStatus] = [:]
+    // MARK: - Per-wallet projections of the active state.
+    //
+    // These read through to `states[activeWalletID]`. SwiftUI
+    // observation tracks the underlying `states` + `activeWalletID`
+    // stored properties, so any mutation that goes through
+    // `updateActive` triggers re-render of views bound to these
+    // accessors.
 
-    /// In-flight L1 deposits at the wallet's per-user address (#108).
-    /// Keyed by `btc_txid` so re-emitted `deposit_pending` events
-    /// just update the existing entry's confirmation count.
-    /// Cleared on the matching `deposit_minted` event — at that
-    /// point the L2 balance has already updated through `tx_applied`,
-    /// so the home-screen pill disappears at the same moment the
-    /// new UTXO appears in history.
-    public private(set) var pendingDeposits: [String: PendingDepositUI] = [:]
+    public var balance: UInt64 { activeState?.balance ?? 0 }
+    public var utxoCount: Int { activeState?.utxoCount ?? 0 }
+    public var history: [AddressHistoryEntry] { activeState?.history ?? [] }
+    public var pendingDeposits: [String: PendingDepositUI] { activeState?.pendingDeposits ?? [:] }
+    public var withdrawalStatuses: [String: WithdrawalUIStatus] { activeState?.withdrawalStatuses ?? [:] }
+
+    private var activeState: WalletLiveState? {
+        guard let id = activeWalletID else { return nil }
+        return states[id]
+    }
+
+    /// Per-wallet live state. Each wallet owns one of these in
+    /// `WalletStore.states`. Value type so mutations through the
+    /// `states` dict are tracked by `@Observable`.
+    public struct WalletLiveState: Equatable {
+        public var balance: UInt64 = 0
+        public var utxoCount: Int = 0
+        public var history: [AddressHistoryEntry] = []
+
+        /// In-flight L1 deposits at this wallet's per-user address
+        /// (#108). Keyed by `btc_txid` so re-emitted `deposit_pending`
+        /// events just update the existing entry's confirmation
+        /// count. Cleared on the matching `deposit_minted` event.
+        public var pendingDeposits: [String: PendingDepositUI] = [:]
+
+        /// Per-burn withdrawal lifecycle, keyed by burn_tx_hash. UI
+        /// renders "Pending bridge confirmation" → "Sent to Bitcoin:
+        /// <txid>" badges on burn rows from this map.
+        public var withdrawalStatuses: [String: WithdrawalUIStatus] = [:]
+
+        public init() {}
+    }
 
     /// Wallet-side view of an in-flight L1 deposit. Uses `Int` for
     /// `confirmations` because the wire shape is signed (the operator
@@ -235,7 +279,7 @@ public final class WalletStore {
             // entry would otherwise stick around stale. Clearing on
             // bootstrap and trusting SSE to repopulate within ~5s
             // is the simplest reconciliation.
-            pendingDeposits.removeAll()
+            updateActive { $0.pendingDeposits.removeAll() }
             await refresh()
             startEventLoop()
         }
@@ -269,19 +313,20 @@ public final class WalletStore {
     /// Switch the active wallet. Re-derives the address, restarts
     /// the SSE loop, and refreshes balance/history for the new
     /// wallet. No biometric prompt — only the public key is read.
+    ///
+    /// State for the previous wallet stays in `states[previousID]`
+    /// so a switch-back doesn't flash a fresh-zero balance through
+    /// the UI before refresh lands. Pending deposits for the *new*
+    /// active wallet are cleared so SSE can repopulate from a clean
+    /// baseline (same reasoning as bootstrap).
     public func selectWallet(id: String) async throws {
         guard id != activeWalletID else { return }
         try keystore.selectWallet(id: id)
         eventTask?.cancel()
         eventTask = nil
         try refreshWalletList()
-        // Reset live state so the previous wallet's balance/history
-        // doesn't briefly flash through during the switch.
-        balance = 0
-        utxoCount = 0
-        history = []
-        withdrawalStatuses = [:]
         connectionState = .idle
+        updateActive { $0.pendingDeposits.removeAll() }
         await refresh()
         startEventLoop()
     }
@@ -292,16 +337,14 @@ public final class WalletStore {
     public func deleteWallet(id: String) async throws {
         let wasActive = (id == activeWalletID)
         try keystore.deleteWallet(id: id)
+        states.removeValue(forKey: id)
         try refreshWalletList()
         if wasActive {
             eventTask?.cancel()
             eventTask = nil
-            balance = 0
-            utxoCount = 0
-            history = []
-            withdrawalStatuses = [:]
             connectionState = .idle
             if hasWallet {
+                updateActive { $0.pendingDeposits.removeAll() }
                 await refresh()
                 startEventLoop()
             }
@@ -382,31 +425,33 @@ public final class WalletStore {
         let info = await infoResult
         let pending = await pendingResult
 
-        if case .success(let b) = bal {
-            self.balance = b.balanceSatoshi
-            self.utxoCount = b.utxoCount
-        }
-        if case .success(let h) = hist {
-            // Newest-first for UI display; the operator emits
-            // ascending so we reverse on the wallet side.
-            self.history = h.entries.sorted { $0.height > $1.height }
+        updateActive { state in
+            if case .success(let b) = bal {
+                state.balance = b.balanceSatoshi
+                state.utxoCount = b.utxoCount
+            }
+            if case .success(let h) = hist {
+                // Newest-first for UI display; the operator emits
+                // ascending so we reverse on the wallet side.
+                state.history = h.entries.sorted { $0.height > $1.height }
+            }
+            if case .success(let p) = pending {
+                // Anything in /pending_withdrawals is still awaiting
+                // broadcast → mark as .pending unless we already saw
+                // its broadcast SSE event (don't clobber a .broadcast
+                // entry that arrived seconds before this refresh).
+                for w in p.withdrawals where w.completed == false {
+                    if state.withdrawalStatuses[w.burnTxHash] == nil {
+                        state.withdrawalStatuses[w.burnTxHash] = .pending
+                    }
+                }
+            }
         }
         if case .success(let f) = fee {
             self.feeRates = f.ratesSatPerVB
         }
         if case .success(let i) = info {
             self.operatorInfo = i.operator
-        }
-        if case .success(let p) = pending {
-            // Anything in /pending_withdrawals is still awaiting
-            // broadcast → mark as .pending unless we already saw
-            // its broadcast SSE event (don't clobber a .broadcast
-            // entry that arrived seconds before this refresh).
-            for w in p.withdrawals where w.completed == false {
-                if withdrawalStatuses[w.burnTxHash] == nil {
-                    withdrawalStatuses[w.burnTxHash] = .pending
-                }
-            }
         }
 
         // Surface the last failed call (if any) for the UI banner.
@@ -458,21 +503,26 @@ public final class WalletStore {
         case .withdrawalStatus:
             // Update the per-burn status map so HistoryRow can show
             // the up-to-date label without a refresh round-trip.
+            // The operator-side SSE filter already restricts withdrawal_status
+            // events to the active wallet's stream, so route to the
+            // active state.
             if let payload = event.asWithdrawalStatus() {
+                let status: WithdrawalUIStatus
                 switch payload.status {
                 case "queued":
-                    withdrawalStatuses[payload.burnTxHash] = .pending
+                    status = .pending
                 case "broadcast":
                     if let id = payload.btcTxID, !id.isEmpty {
-                        withdrawalStatuses[payload.burnTxHash] = .broadcast(btcTxID: id)
+                        status = .broadcast(btcTxID: id)
                     } else {
                         // Operator told us "broadcast" without a txid —
                         // shouldn't happen, but render gracefully.
-                        withdrawalStatuses[payload.burnTxHash] = .unknownState("broadcast")
+                        status = .unknownState("broadcast")
                     }
                 default:
-                    withdrawalStatuses[payload.burnTxHash] = .unknownState(payload.status)
+                    status = .unknownState(payload.status)
                 }
+                updateActive { $0.withdrawalStatuses[payload.burnTxHash] = status }
             }
         case .depositPending:
             // L1 deposit detected at our per-user address; mint
@@ -480,13 +530,14 @@ public final class WalletStore {
             // the confirmation count advances toward the agent's
             // signing threshold — last write wins by design.
             if let payload = event.asDepositPending(), payload.recipient == address {
-                pendingDeposits[payload.btcTxID] = PendingDepositUI(
+                let pd = PendingDepositUI(
                     btcTxID: payload.btcTxID,
                     vout: payload.vout,
                     amountSatoshi: payload.amountSatoshi,
                     confirmations: payload.confirmations,
                     perUser: payload.perUser
                 )
+                updateActive { $0.pendingDeposits[payload.btcTxID] = pd }
             }
         case .depositMinted:
             // Mint applied — clear the pending pill, then refresh
@@ -498,12 +549,25 @@ public final class WalletStore {
             // Refreshing here is idempotent with any tx_applied that
             // does arrive.
             if let payload = event.asDepositMinted(), payload.recipient == address {
-                pendingDeposits.removeValue(forKey: payload.btcTxID)
+                updateActive { $0.pendingDeposits.removeValue(forKey: payload.btcTxID) }
                 await refresh()
             }
         case .unknown:
             break
         }
+    }
+
+    // MARK: - State mutation helper
+
+    /// Mutate the active wallet's `WalletLiveState` in place,
+    /// creating the entry on first access. All per-wallet writes go
+    /// through this so SwiftUI observes a single `states` change per
+    /// mutation block.
+    private func updateActive(_ mutate: (inout WalletLiveState) -> Void) {
+        guard let id = activeWalletID else { return }
+        var s = states[id] ?? WalletLiveState()
+        mutate(&s)
+        states[id] = s
     }
 
     // MARK: - Helpers
