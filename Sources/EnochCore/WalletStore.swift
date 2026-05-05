@@ -83,14 +83,16 @@ public final class WalletStore {
     }
 
     /// Bitcoin confirmations the bridge agents wait for before
-    /// signing a mint, mirroring the per-network threshold in the
-    /// agent's DepositVerifier (mainnet=6 for cascade-zero finality,
-    /// testnet=3, regtest=1). Used to render the progress
-    /// denominator on the home-screen pending-deposit pill.
-    /// Defaults to 1 when `/v1/info` hasn't loaded yet — the wallet
-    /// gracefully renders "N/1" until the operator's network is
-    /// known, then redraws.
+    /// signing a mint. Authoritative source is the operator's
+    /// /v1/info `min_deposit_confirmations` (sourced from
+    /// MIN_DEPOSIT_CONFS env / DefaultMinDepositConfs). Falls back
+    /// to a network-name guess for older operators that don't yet
+    /// emit the field, and to 1 when /v1/info hasn't loaded — the
+    /// wallet gracefully renders "N/1" until it does, then redraws.
     public var minConfirmationsForDeposit: Int {
+        if let n = operatorInfo?.minDepositConfirmations, n > 0 {
+            return Int(n)
+        }
         switch operatorInfo?.network {
         case "mainnet": return 6
         case "testnet", "testnet3", "signet": return 3

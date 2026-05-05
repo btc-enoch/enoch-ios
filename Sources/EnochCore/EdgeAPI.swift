@@ -48,6 +48,10 @@ public struct OperatorInfo: Codable, Equatable {
     public let bridgeRedeemScript: String?
     public let agentPayoutAddresses: [String]?
     public let withdrawalChallengeWindowL1Blocks: UInt64
+    /// L1 confirmation threshold the operator gates mints on. Optional
+    /// so older operators (pre-this-field) still decode; wallet falls
+    /// back to a network-name guess when nil.
+    public let minDepositConfirmations: UInt64?
     public let currentHeight: UInt64
     public let feeSchedule: FeeSchedule?
 
@@ -64,6 +68,7 @@ public struct OperatorInfo: Codable, Equatable {
         case bridgeRedeemScript = "bridge_redeem_script"
         case agentPayoutAddresses = "agent_payout_addresses"
         case withdrawalChallengeWindowL1Blocks = "withdrawal_challenge_window_l1_blocks"
+        case minDepositConfirmations = "min_deposit_confirmations"
         case currentHeight = "current_height"
         case feeSchedule = "fee_schedule"
     }
