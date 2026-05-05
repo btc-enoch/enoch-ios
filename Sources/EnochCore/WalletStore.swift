@@ -489,11 +489,17 @@ public final class WalletStore {
                 )
             }
         case .depositMinted:
-            // Mint applied — clear the pending pill. The matching
-            // tx_applied that arrives on the same SSE turn will
-            // refresh balance + history.
+            // Mint applied — clear the pending pill, then refresh
+            // balance + history directly. We used to rely solely on
+            // the matching tx_applied event for the refresh, but if
+            // the SSE connection landed on a follower whose mint
+            // replay path skipped publishTxApplied, the balance
+            // would stick at 0 until the user pulled to refresh.
+            // Refreshing here is idempotent with any tx_applied that
+            // does arrive.
             if let payload = event.asDepositMinted(), payload.recipient == address {
                 pendingDeposits.removeValue(forKey: payload.btcTxID)
+                await refresh()
             }
         case .unknown:
             break

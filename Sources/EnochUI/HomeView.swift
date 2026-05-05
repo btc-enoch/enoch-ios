@@ -138,10 +138,15 @@ private struct PendingDepositRow: View {
     }
 
     private var statusText: String {
-        if deposit.confirmations >= target {
-            return "Crediting…"
-        }
-        return "\(deposit.confirmations)/\(target) confirmations"
+        // Operator keeps emitting deposit_pending each watcher tick
+        // until the mint applies, so confirmations can exceed the
+        // target between "ready to sign" and "mint applied". Clamp
+        // the displayed numerator so the count doesn't visibly run
+        // past the target — once the user sees "1/1" they know the
+        // bridge is doing its work, the next state is the row
+        // disappearing on deposit_minted.
+        let shown = min(deposit.confirmations, target)
+        return "\(shown)/\(target) confirmations"
     }
 }
 
