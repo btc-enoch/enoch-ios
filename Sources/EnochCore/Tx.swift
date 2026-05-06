@@ -11,6 +11,7 @@
 // byte-for-byte. A one-bit drift here produces signatures that look
 // valid but verify to false.
 
+import EnochCrypto
 import Foundation
 
 // MARK: - Domain types
@@ -186,33 +187,18 @@ public extension Tx {
     }
 
     /// BIP-341 keypath sighash for input `inputIndex` under
-    /// SIGHASH_DEFAULT (the standard Taproot keypath sighash type).
+    /// SIGHASH_DEFAULT. Delegates to EnochCrypto (Rust) via
+    /// federation/ffi/enoch-crypto-core/src/sighash.rs — which uses
+    /// rust-bitcoin's `SighashCache::taproot_key_spend_signature_hash`
+    /// internally. Same crate the operator/agent will eventually use
+    /// (replacing the btcsuite path), so a single implementation
+    /// produces the bytes both sides commit to.
     ///
-    /// Algorithm — `sighash = SHA256_TapSighash(0x00 || preimage)`
-    /// where the leading 0x00 is the BIP-341 sighash epoch byte
-    /// (always 0x00 today; reserved for future extensions) and
-    /// preimage is:
-    ///
-    ///   hash_type      (1 byte)         0x00 for SIGHASH_DEFAULT
-    ///   nVersion       (4 LE)
-    ///   nLockTime      (4 LE)
-    ///   sha_prevouts   (32)             SHA256 of all input outpoints
-    ///   sha_amounts    (32)             SHA256 of all input amounts
-    ///   sha_scripts    (32)             SHA256 of all input scriptPubKeys
-    ///   sha_sequences  (32)             SHA256 of all input sequences
-    ///   sha_outputs    (32)             SHA256 of all output (amount + script)
-    ///   spend_type     (1 byte)         0x00 for keypath, no annex
-    ///   input_index    (4 LE)
-    ///
-    /// Total tagged-hash input = 175 bytes (1 epoch + 174 preimage).
-    /// Final tagged hash uses tag "TapSighash". `prevouts.count`
-    /// MUST equal `inputs.count` — BIP-341 commits to ALL inputs'
-    /// amounts + scripts, not just the one being signed.
-    ///
-    /// Cross-validated byte-for-byte against btcsuite's
-    /// `txscript.CalcTaprootSignatureHash`, which is what the operator
-    /// uses to verify witness sigs (see TxBIP341SighashTests parity
-    /// vector).
+    /// Range + count validation stays Swift-side so callers keep the
+    /// existing `TxError.{inputIndexOutOfRange, prevoutCountMismatch}`
+    /// contract — only the inner hash computation moves to Rust.
+    /// Cross-language parity is pinned by
+    /// TxBIP341SighashTests.testKeypathSighashParityWithOperatorVector.
     func sighashBIP341Keypath(
         inputIndex: Int,
         prevouts: [Prevout]
@@ -223,57 +209,15 @@ public extension Tx {
         guard prevouts.count == inputs.count else {
             throw TxError.prevoutCountMismatch(have: prevouts.count, need: inputs.count)
         }
-
-        var preimage = Data()
-        preimage.append(0x00)                           // sighash epoch (BIP-341)
-        preimage.append(0x00)                           // hash_type = SIGHASH_DEFAULT
-        preimage.appendUInt32LE(version)
-        preimage.appendUInt32LE(lockTime)
-
-        // sha_prevouts: SHA256( for each input: txHash(wire) || vout LE )
-        var prevoutsBlob = Data()
-        for inp in inputs {
-            // txHash is in display order on TxInput; wire order is reversed.
-            prevoutsBlob.append(Data(inp.txHash.reversed()))
-            prevoutsBlob.appendUInt32LE(inp.vout)
+        let txBytes = try wireBytes()
+        let rustPrevouts = prevouts.map {
+            EnochCrypto.Prevout(value: $0.amountSatoshi, scriptPubkey: $0.scriptPubKey)
         }
-        preimage.append(Hashing.sha256(prevoutsBlob))
-
-        // sha_amounts
-        var amountsBlob = Data()
-        for prev in prevouts {
-            amountsBlob.appendUInt64LE(prev.amountSatoshi)
-        }
-        preimage.append(Hashing.sha256(amountsBlob))
-
-        // sha_scripts: SHA256( for each input: varint(script.count) || script )
-        var scriptsBlob = Data()
-        for prev in prevouts {
-            scriptsBlob.appendVarInt(UInt64(prev.scriptPubKey.count))
-            scriptsBlob.append(prev.scriptPubKey)
-        }
-        preimage.append(Hashing.sha256(scriptsBlob))
-
-        // sha_sequences
-        var seqBlob = Data()
-        for inp in inputs {
-            seqBlob.appendUInt32LE(inp.sequence)
-        }
-        preimage.append(Hashing.sha256(seqBlob))
-
-        // sha_outputs: SHA256( for each output: amount LE || varint(spk.count) || spk )
-        var outputsBlob = Data()
-        for out in outputs {
-            outputsBlob.appendUInt64LE(out.amount)
-            outputsBlob.appendVarInt(UInt64(out.scriptPubKey.count))
-            outputsBlob.append(out.scriptPubKey)
-        }
-        preimage.append(Hashing.sha256(outputsBlob))
-
-        preimage.append(0x00)                           // spend_type = keypath, no annex
-        preimage.appendUInt32LE(UInt32(inputIndex))
-
-        return Secp256k1.taggedHash(tag: "TapSighash", data: preimage)
+        return try EnochCrypto.sighashKeypath(
+            txBytes: txBytes,
+            inputIndex: UInt32(inputIndex),
+            prevouts: rustPrevouts
+        )
     }
 }
 
