@@ -34,13 +34,25 @@ let package = Package(
         // P-256 / NIST curves only), so this is the canonical Swift
         // wrapper around libsecp256k1. The library's `.signature(for:)`
         // produces low-s-normalized DER as Bitcoin Script requires.
+        //
+        // Being phased out by Phase 4 of #161: schnorr + tap-tweak +
+        // sighash are migrating to EnochCrypto (Rust). The dep stays
+        // until 4d removes the last call site.
         .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", from: "0.23.0"),
+        // Single-source crypto core in Rust, consumed via UniFFI as
+        // an XCFramework. Eliminates the Swift↔Go drift class that
+        // parity vectors mitigate but don't fix. Phase 2 (#164) built
+        // the XCFramework + SwiftPM consumer at
+        // ../enoch/federation/ffi/ios-test/; Phase 4 (#166) routes
+        // call sites through it. See CLAUDE/MEMORY for context.
+        .package(name: "EnochCrypto", path: "../enoch/federation/ffi/ios-test"),
     ],
     targets: [
         .target(
             name: "EnochCore",
             dependencies: [
                 .product(name: "P256K", package: "swift-secp256k1"),
+                .product(name: "EnochCrypto", package: "EnochCrypto"),
             ]
         ),
         .testTarget(
