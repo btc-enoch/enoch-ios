@@ -1,46 +1,36 @@
-// DepositAddress — per-user Bitcoin L1 deposit address derivation (#108).
+// DepositAddress — per-user Bitcoin L1 deposit address derivation.
 //
-// Each L2 user has a unique L1 deposit address derived deterministically
-// from their 32-byte x-only L2 pubkey + the bridge's existing 3-of-5
-// agent set. The wallet learns the agent set via the legacy P2SH
-// multisig redeem script published in `/v1/info`; we parse out the
-// agent pubkeys and threshold and *rebuild* a BIP-342-compatible
-// tap-leaf using OP_CHECKSIGADD. The legacy redeem script ends in
-// OP_CHECKMULTISIG, which BIP-342 disables in tapscript — wrapping
-// it directly in a tap-leaf would produce funds-locked outputs.
+// Implements spec/deposit_address.md: a P2TR output with NUMS as the
+// internal key and a two-leaf tap-tree.
 //
-// Construction:
+//   internal      = NUMS                          (BIP-341 §3 unspendable)
+//   leaf_A_script = <x_a0> CHECKSIG
+//                   <x_a1> CHECKSIGADD
+//                   ...
+//                   <x_a{N-1}> CHECKSIGADD
+//                   <M> NUMEQUAL                  (BIP-342 multisig)
+//   leaf_B_script = <R> CSV OP_DROP
+//                   <user_xonly> CHECKSIG          (user reclaim)
+//   H_A           = TaggedHash("TapLeaf", 0xc0 || varint(|S_A|) || S_A)
+//   H_B           = TaggedHash("TapLeaf", 0xc0 || varint(|S_B|) || S_B)
+//   merkle_root   = TaggedHash("TapBranch", min(H_A,H_B) || max(H_A,H_B))
+//   t             = TaggedHash("TapTweak", NUMS_xonly || merkle_root)
+//   output_key    = x(NUMS + t·G)
 //
-//   internal_pubkey = NUMS                 (well-known unspendable point)
-//   user_salt   = tagged_hash("EnochUserDeposit", L2_XONLY)
-//   inner       = <x_pk1> OP_CHECKSIG
-//                 <x_pk2> OP_CHECKSIGADD
-//                 ...
-//                 <x_pkN> OP_CHECKSIGADD
-//                 OP_M OP_NUMEQUAL
-//   leaf_script = <push 32> <user_salt> OP_DROP <inner>
-//   leaf_hash   = tagged_hash("TapLeaf", 0xc0 || varint(|leaf_script|) || leaf_script)
-//   merkle_root = leaf_hash                (single-leaf tree)
-//   t           = tagged_hash("TapTweak", NUMS_xonly || merkle_root)
-//   output_key  = NUMS + t·G               (x-only)
-//   address     = bech32m(witver=1, output_key) under the L1 HRP
+// Per-user uniqueness comes from leaf B's `user_xonly` push: same
+// federation, different user → different H_B → different merkle root
+// → different output key. Leaf A is constant across users.
 //
-// Spending the resulting UTXO requires 3 BIP-340 Schnorr signatures
-// over the leaf — same agents, same threshold as today's bridge,
-// just signing with Schnorr instead of ECDSA for the deposit-sweep
-// path. Cross-language parity vector pinned against the Python
-// reference implementation in bridge/enoch/shared/enoch_address.py;
-// the spend round-trip in bridge/tests/test_deposit_spend_roundtrip.py
-// proves the construction is actually spendable on regtest. See
-// spec/deposit_flow.md.
+// The federation can spend via leaf A (M-of-N agent sweep). The user
+// can reclaim via leaf B once the deposit UTXO has matured `R` blocks
+// (BIP-68 sequence; OP_CSV enforces). Mirrors
+// federation/depositaddr/depositaddr.go byte-for-byte.
 
 import Foundation
 
 public enum DepositAddress {
     /// BIP-341 NUMS unspendable point (the well-known x-only key
-    /// `lift_x(0x50929b...)` from BIP-341 §3). Provably has no
-    /// privkey, so the keypath spend is unusable; only the
-    /// tap-script path works.
+    /// `lift_x(0x50929b...)`).
     public static let numsXOnlyHex =
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
 
@@ -62,19 +52,22 @@ public enum DepositAddress {
 
     public enum Error: Swift.Error, Equatable {
         case invalidL2XOnly(byteCount: Int)
+        case invalidUserXOnly(byteCount: Int)
         case invalidRedeemScriptHex
         case malformedRedeemScript(String)
+        case invalidReclaimR(reason: String)
         case bech32(String)
         case crypto(String)
     }
 
-    /// Bitcoin Script opcodes used in the deposit leaf. Spelled out
+    /// Bitcoin Script opcodes used in the deposit leaves. Spelled out
     /// here so the leaf-script construction is auditable from this
     /// file alone.
     private static let opDrop: UInt8        = 0x75
     private static let opCheckSig: UInt8    = 0xac
     private static let opCheckSigAdd: UInt8 = 0xba
     private static let opNumEqual: UInt8    = 0x9c
+    private static let opCSV: UInt8         = 0xb2 // OP_CHECKSEQUENCEVERIFY
 
     /// Encode a small integer 0..16 as the corresponding OP_N byte.
     /// OP_0 = 0x00; OP_1..OP_16 = 0x51..0x60.
@@ -84,11 +77,34 @@ public enum DepositAddress {
         throw Error.malformedRedeemScript("can't OP_N-encode \(n)")
     }
 
+    /// Push a CScriptNum onto an output buffer using the most compact
+    /// valid form: OP_0 / OP_1..OP_16 for small values, otherwise
+    /// minimal little-endian bytes with sign-bit padding per
+    /// CScriptNum encoding. Used for the OP_CSV operand.
+    private static func appendScriptNum(_ n: UInt32, to out: inout Data) {
+        if n == 0 {
+            out.append(0x00) // OP_0
+            return
+        }
+        if n <= 16 {
+            out.append(UInt8(0x50) + UInt8(n)) // OP_1..OP_16
+            return
+        }
+        var v = n
+        var bytes: [UInt8] = []
+        while v > 0 {
+            bytes.append(UInt8(v & 0xFF))
+            v >>= 8
+        }
+        if bytes.last! & 0x80 != 0 {
+            bytes.append(0x00)
+        }
+        out.append(UInt8(bytes.count))
+        out.append(contentsOf: bytes)
+    }
+
     /// Parse a legacy `OP_M <pk1>..<pkN> OP_N OP_CHECKMULTISIG` redeem
-    /// script into (compressed pubkeys, m, n). Used as the input shape
-    /// to the per-user deposit derivation: `/v1/info` ships this
-    /// legacy form, and we rebuild a BIP-342-compatible tap-leaf
-    /// from it on the wallet side.
+    /// script into (compressed pubkeys, m, n).
     static func parseLegacyMultisigRedeem(
         _ redeem: Data
     ) throws -> (pubkeys: [Data], m: Int, n: Int) {
@@ -137,18 +153,35 @@ public enum DepositAddress {
         return (pubkeys, m, n)
     }
 
-    /// Build the m-of-n tapscript-compatible bridge inner leaf:
+    /// Strip the parity prefix from a 33-byte compressed secp256k1
+    /// pubkey, returning the 32-byte x-only form.
+    public static func xOnlyFromCompressed(_ compressed: Data) throws -> Data {
+        guard compressed.count == 33 else {
+            throw Error.malformedRedeemScript(
+                "compressed pubkey must be 33 bytes, got \(compressed.count)"
+            )
+        }
+        let prefix = compressed[compressed.startIndex]
+        guard prefix == 0x02 || prefix == 0x03 else {
+            throw Error.malformedRedeemScript(
+                "compressed pubkey must start with 0x02 or 0x03"
+            )
+        }
+        return compressed.subdata(in: (compressed.startIndex + 1)..<compressed.endIndex)
+    }
+
+    /// Build the M-of-N bridge sweep tap-script (leaf A):
     ///
     ///     <x_pk1> OP_CHECKSIG
     ///     <x_pk2> OP_CHECKSIGADD
     ///     ...
     ///     <x_pkN> OP_CHECKSIGADD
-    ///     OP_M OP_NUMEQUAL
+    ///     <M>     OP_NUMEQUAL
     ///
-    /// Each pubkey is 32-byte x-only (drop parity prefix from the
-    /// legacy 33-byte compressed form). BIP-342 replacement for the
-    /// disabled `OP_CHECKMULTISIG`.
-    static func buildBridgeLeafInner(agentXOnly: [Data], m: Int) throws -> Data {
+    /// Constant across all users — per-user uniqueness lives in leaf B.
+    public static func buildBridgeLeafScript(
+        agentXOnly: [Data], m: Int
+    ) throws -> Data {
         guard !agentXOnly.isEmpty else {
             throw Error.malformedRedeemScript("need at least one agent pubkey")
         }
@@ -171,17 +204,85 @@ public enum DepositAddress {
         return out
     }
 
-    /// Derive the user's L1 deposit address.
+    /// Build the user CSV-locked reclaim tap-script (leaf B):
     ///
-    /// `l2XOnly` is the user's 32-byte BIP-340 x-only secp256k1
-    /// pubkey — the same bytes embedded in the user's `enoch1p...`
-    /// Taproot address.
+    ///     <R> OP_CHECKSEQUENCEVERIFY OP_DROP
+    ///     <user_xonly> OP_CHECKSIG
+    public static func buildReclaimLeafScript(
+        userXOnly: Data, reclaimR R: UInt32
+    ) throws -> Data {
+        guard userXOnly.count == 32 else {
+            throw Error.invalidUserXOnly(byteCount: userXOnly.count)
+        }
+        guard R > 0 else {
+            throw Error.invalidReclaimR(
+                reason: "R must be > 0 (zero-block reclaim defeats the lock)"
+            )
+        }
+        guard R & 0xFFFF_0000 == 0 else {
+            throw Error.invalidReclaimR(
+                reason: "R=\(R) exceeds BIP-68 16-bit block-count field"
+            )
+        }
+        var out = Data()
+        appendScriptNum(R, to: &out)
+        out.append(opCSV)
+        out.append(opDrop)
+        out.append(0x20) // 32-byte push
+        out.append(userXOnly)
+        out.append(opCheckSig)
+        return out
+    }
+
+    /// Compute the 32-byte x-only Taproot output key for a per-user
+    /// deposit address. Reclaim-spend construction (control blocks
+    /// with parity bits) lands in a follow-up commit alongside the
+    /// reclaim signing flow.
+    public static func outputKey(
+        l2XOnly: Data,
+        bridgeRedeemScript: Data,
+        reclaimR R: UInt32
+    ) throws -> Data {
+        guard l2XOnly.count == 32 else {
+            throw Error.invalidL2XOnly(byteCount: l2XOnly.count)
+        }
+        let parsed = try parseLegacyMultisigRedeem(bridgeRedeemScript)
+        let agentXOnly = try parsed.pubkeys.map { try xOnlyFromCompressed($0) }
+
+        let bridgeLeaf = try buildBridgeLeafScript(agentXOnly: agentXOnly, m: parsed.m)
+        let reclaimLeaf = try buildReclaimLeafScript(userXOnly: l2XOnly, reclaimR: R)
+
+        let hBridge = tapLeafHash(bridgeLeaf)
+        let hReclaim = tapLeafHash(reclaimLeaf)
+        let merkleRoot = tapBranchHash(hBridge, hReclaim)
+
+        let numsXOnly = try Data(hex: numsXOnlyHex)
+        var tweakInput = Data()
+        tweakInput.append(numsXOnly)
+        tweakInput.append(merkleRoot)
+        let tweak = Secp256k1.taggedHash(tag: "TapTweak", data: tweakInput)
+
+        do {
+            let outKey = try Secp256k1.applyTaprootTweak(
+                internalXOnly: numsXOnly, tweak: tweak
+            )
+            return outKey.bytes
+        } catch {
+            throw Error.crypto(String(describing: error))
+        }
+    }
+
+    /// Derive the user's L1 deposit address as a bech32m string.
+    ///
+    /// `l2XOnly` is the user's 32-byte x-only secp256k1 pubkey — the
+    /// same bytes embedded in their `enoch1p…` Taproot address.
     /// `bridgeRedeemScriptHex` comes from `/v1/info`'s
-    /// `bridge_redeem_script` field.
-    /// `network` selects the bech32m HRP.
+    /// `bridge_redeem_script` field. `reclaimR` is the federation's
+    /// pinned reclaim relative-timelock (also from `/v1/info`).
     public static func derive(
         l2XOnly: Data,
         bridgeRedeemScriptHex: String,
+        reclaimR R: UInt32,
         network: Network
     ) throws -> String {
         let bridgeRedeem: Data
@@ -191,17 +292,15 @@ public enum DepositAddress {
             throw Error.invalidRedeemScriptHex
         }
 
-        let outputKey = try outputKey(
+        let outKey = try outputKey(
             l2XOnly: l2XOnly,
-            bridgeRedeemScript: bridgeRedeem
+            bridgeRedeemScript: bridgeRedeem,
+            reclaimR: R
         )
 
-        // bech32m segwit encoding: witver=1 byte + 32-byte program in
-        // 5-bit groups. Same shape as the wallet's own enoch1p... but
-        // under a Bitcoin HRP.
         do {
             let prog = try Bech32.convertBits(
-                [UInt8](outputKey), from: 8, to: 5, pad: true
+                [UInt8](outKey), from: 8, to: 5, pad: true
             )
             let payload: [UInt8] = [1] + prog
             return try Bech32.encode(
@@ -214,69 +313,29 @@ public enum DepositAddress {
         }
     }
 
-    /// Lower-level: just compute the 32-byte x-only Taproot output
-    /// key. Useful for cross-language parity tests + for callers that
-    /// want the raw scriptPubkey bytes (`OP_1 <push 32> <output_key>`).
-    public static func outputKey(
-        l2XOnly: Data,
-        bridgeRedeemScript: Data
-    ) throws -> Data {
-        guard l2XOnly.count == 32 else {
-            throw Error.invalidL2XOnly(byteCount: l2XOnly.count)
-        }
+    // MARK: - Hashing primitives
 
-        // Parse the legacy P2SH 3-of-5 multisig and rebuild as a
-        // BIP-342-compatible inner leaf using OP_CHECKSIGADD.
-        let parsed = try parseLegacyMultisigRedeem(bridgeRedeemScript)
-        let agentXOnly = parsed.pubkeys.map { $0.subdata(in: 1..<33) }
-        let inner = try buildBridgeLeafInner(agentXOnly: agentXOnly, m: parsed.m)
-
-        // Per-user salt + tap-leaf:
-        //   leaf_script = <push 32> <salt> OP_DROP <inner>
-        let salt = Secp256k1.taggedHash(tag: "EnochUserDeposit", data: l2XOnly)
-        var leafScript = Data()
-        leafScript.append(0x20)
-        leafScript.append(salt)
-        leafScript.append(opDrop)
-        leafScript.append(inner)
-
-        // tap-leaf hash: SHA256_TapLeaf(0xc0 || varint(|leaf|) || leaf).
-        // 0xc0 is the BIP-342 leaf version (top 6 bits 0xc0, bottom 2
-        // are the parity bits set later by the tweak — for hashing
-        // purposes the canonical leaf-version constant is 0xc0).
-        var leafBlob = Data()
-        leafBlob.append(0xc0)
-        leafBlob.append(contentsOf: encodeVarInt(UInt64(leafScript.count)))
-        leafBlob.append(leafScript)
-        let leafHash = Secp256k1.taggedHash(tag: "TapLeaf", data: leafBlob)
-
-        // Single-leaf tree → merkle_root == leaf_hash.
-        let merkleRoot = leafHash
-
-        // BIP-341 keypath tweak with non-empty merkle root:
-        // t = tagged_hash("TapTweak", internal_xonly || merkle_root)
-        let numsXOnly = try Data(hex: numsXOnlyHex)
-        var tweakInput = Data()
-        tweakInput.append(numsXOnly)
-        tweakInput.append(merkleRoot)
-        let tweak = Secp256k1.taggedHash(tag: "TapTweak", data: tweakInput)
-
-        // output_key = NUMS + t·G (x-only). Same primitive used for
-        // the wallet's own keypath output key, just with a non-empty
-        // merkle root in the tweak.
-        do {
-            let outputKey = try Secp256k1.applyTaprootTweak(
-                internalXOnly: numsXOnly,
-                tweak: tweak
-            )
-            return outputKey.bytes
-        } catch {
-            throw Error.crypto(String(describing: error))
-        }
+    /// Compute BIP-341 TapLeaf hash:
+    ///   TaggedHash("TapLeaf", 0xc0 || varint(|script|) || script)
+    private static func tapLeafHash(_ script: Data) -> Data {
+        var blob = Data()
+        blob.append(0xc0)
+        blob.append(contentsOf: encodeVarInt(UInt64(script.count)))
+        blob.append(script)
+        return Secp256k1.taggedHash(tag: "TapLeaf", data: blob)
     }
 
-    /// Bitcoin varint encoding. Used only by the tap-leaf prologue;
-    /// we don't need a general tx-serialization codec.
+    /// Compute BIP-341 TapBranch hash:
+    ///   TaggedHash("TapBranch", min(a,b) || max(a,b))
+    private static func tapBranchHash(_ a: Data, _ b: Data) -> Data {
+        let (left, right): (Data, Data) = a.lexicographicallyPrecedes(b) ? (a, b) : (b, a)
+        var combined = Data()
+        combined.append(left)
+        combined.append(right)
+        return Secp256k1.taggedHash(tag: "TapBranch", data: combined)
+    }
+
+    /// Bitcoin varint encoding. Used by the tap-leaf prologue.
     private static func encodeVarInt(_ n: UInt64) -> [UInt8] {
         if n < 0xFD {
             return [UInt8(n)]
@@ -296,5 +355,19 @@ public enum DepositAddress {
             out.append(UInt8((n >> (8 * i)) & 0xFF))
         }
         return out
+    }
+}
+
+private extension Data {
+    /// Lexicographic byte-string comparison. Used for BIP-341
+    /// TapBranch ordering (sort children by raw 32-byte hash).
+    func lexicographicallyPrecedes(_ other: Data) -> Bool {
+        let n = Swift.min(count, other.count)
+        for i in 0..<n {
+            let l = self[self.index(self.startIndex, offsetBy: i)]
+            let r = other[other.index(other.startIndex, offsetBy: i)]
+            if l != r { return l < r }
+        }
+        return count < other.count
     }
 }

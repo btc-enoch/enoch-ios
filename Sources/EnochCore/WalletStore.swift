@@ -160,6 +160,7 @@ public final class WalletStore {
             let l2Address = address,
             let info = operatorInfo,
             let redeem = info.bridgeRedeemScript,
+            let reclaimR = info.depositReclaimR,
             let network = DepositAddress.Network(infoNetwork: info.network)
         else { return nil }
         guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
@@ -171,6 +172,7 @@ public final class WalletStore {
         return try? DepositAddress.derive(
             l2XOnly: outputKey,
             bridgeRedeemScriptHex: redeem,
+            reclaimR: reclaimR,
             network: network
         )
     }
@@ -187,7 +189,8 @@ public final class WalletStore {
         guard
             let l2Address = address,
             let info = operatorInfo,
-            let redeem = info.bridgeRedeemScript
+            let redeem = info.bridgeRedeemScript,
+            let reclaimR = info.depositReclaimR
         else { return nil }
         guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
             return nil
@@ -200,7 +203,8 @@ public final class WalletStore {
         }
         return try? DepositAddress.outputKey(
             l2XOnly: outputKey,
-            bridgeRedeemScript: redeemBytes
+            bridgeRedeemScript: redeemBytes,
+            reclaimR: reclaimR
         )
     }
 

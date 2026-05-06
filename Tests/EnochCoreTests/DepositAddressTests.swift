@@ -1,16 +1,22 @@
 import XCTest
 @testable import EnochCore
 
-/// Per-user Taproot deposit-address derivation (#108).
+/// Per-user Taproot deposit-address derivation.
 ///
-/// Cross-language parity with the Python derivation in
-/// bridge/enoch/shared/enoch_address.py::deposit_address. Same vector
-/// pinned on both sides — drift on either side fails one of the two
-/// test suites loud.
+/// Cross-language parity with the Go derivation in
+/// federation/depositaddr (and the Python derivation in
+/// bridge/enoch/shared/enoch_address.py). Same vector pinned on all
+/// sides — drift on any side fails one of the test suites loud.
+///
+/// These vectors track the two-leaf tap-tree from
+/// spec/deposit_address.md: leaf A = bridge multisig (constant),
+/// leaf B = `<R> CSV DROP <user_xonly> CHECKSIG`. Per-user
+/// uniqueness now lives in leaf B's `user_xonly` push, so the salt-
+/// and-OP_DROP prologue from the previous shape is gone.
 final class DepositAddressTests: XCTestCase {
     /// Synthetic 3-of-5 multisig redeem script with deterministic
-    /// pubkeys (0x02 || 0x11..0x15 repeating). Lets the test pin
-    /// exact bytes without depending on init.py-generated keys.
+    /// pubkeys (0x02 || 0x11..0x15 repeating). Same bytes
+    /// federation/depositaddr/parity.go uses.
     private static let bridgeRedeemHex =
         "53" +
         "2102" + String(repeating: "11", count: 32) +
@@ -24,46 +30,54 @@ final class DepositAddressTests: XCTestCase {
     /// would expose via its `enoch1p...` Taproot address.
     private static let l2XOnly = Data(repeating: 0x55, count: 32)
 
-    /// PARITY VECTOR — bytes computed by the Python derivation
-    /// (deposit_output_key) on the inputs above. Must match exactly;
-    /// any drift here means the operator's view of "where the user
-    /// said to send funds" differs from the wallet's view, which is
-    /// silently fund-losing.
-    private static let expectedOutputKeyHex =
-        "c68d39ff777d9076e7135937af36e333469b68e8fceee9883d76d9a07e9a1fa0"
-    private static let expectedRegtestAddr =
-        "bcrt1pc6xnnlmh0kg8decntym67dhrxdrfk68glnhwnzpawmv6ql56r7sq9v7nfv"
-    private static let expectedMainnetAddr =
-        "bc1pc6xnnlmh0kg8decntym67dhrxdrfk68glnhwnzpawmv6ql56r7sqlaz6xe"
+    /// Reclaim relative-timelock for the parity fixture (regtest-
+    /// style — small enough to test reclaim spends quickly). Mainnet
+    /// uses 1008 (~1 week).
+    private static let reclaimR: UInt32 = 10
 
-    func testOutputKeyMatchesPythonVector() throws {
+    /// PARITY VECTOR — bytes computed by the Go derivation
+    /// (federation/depositaddr) on the inputs above. Must match
+    /// exactly; drift here means the wallet would compute a different
+    /// deposit address than the operator's registry, which is silently
+    /// fund-losing.
+    private static let expectedOutputKeyHex =
+        "9b32e7bc412374bb085e1cdca711213a7d81c35a3946533ed09193f602f4d68b"
+    private static let expectedRegtestAddr =
+        "bcrt1pnvew00zpyd6tkzz7rnw2wyfp8f7crs6689r9x0ksjxflvqh5669sm45ete"
+    private static let expectedMainnetAddr =
+        "bc1pnvew00zpyd6tkzz7rnw2wyfp8f7crs6689r9x0ksjxflvqh5669spygsyv"
+
+    func testOutputKeyMatchesParityVector() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
         let outputKey = try DepositAddress.outputKey(
             l2XOnly: Self.l2XOnly,
-            bridgeRedeemScript: redeem
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR
         )
         XCTAssertEqual(outputKey.count, 32)
         XCTAssertEqual(
             outputKey.map { String(format: "%02x", $0) }.joined(),
             Self.expectedOutputKeyHex,
-            "Swift output_key must match Python's bytes-for-bytes — drift here means the wallet would compute a different deposit address than the operator's registry"
+            "Swift output_key must match Go's bytes-for-bytes — drift here means the wallet would compute a different deposit address than the operator's registry"
         )
     }
 
-    func testRegtestAddressMatchesPythonVector() throws {
+    func testRegtestAddressMatchesParityVector() throws {
         let addr = try DepositAddress.derive(
             l2XOnly: Self.l2XOnly,
             bridgeRedeemScriptHex: Self.bridgeRedeemHex,
+            reclaimR: Self.reclaimR,
             network: .regtest
         )
         XCTAssertEqual(addr, Self.expectedRegtestAddr)
         XCTAssertTrue(addr.hasPrefix("bcrt1p"), "regtest Taproot addresses start with bcrt1p")
     }
 
-    func testMainnetAddressMatchesPythonVector() throws {
+    func testMainnetAddressMatchesParityVector() throws {
         let addr = try DepositAddress.derive(
             l2XOnly: Self.l2XOnly,
             bridgeRedeemScriptHex: Self.bridgeRedeemHex,
+            reclaimR: Self.reclaimR,
             network: .mainnet
         )
         XCTAssertEqual(addr, Self.expectedMainnetAddr)
@@ -71,28 +85,55 @@ final class DepositAddressTests: XCTestCase {
     }
 
     /// Different L2 pubkeys must produce different deposit addresses.
-    /// Catches a regression where the per-user salt isn't actually
+    /// Catches a regression where the user_xonly inside leaf B isn't
     /// being mixed into the merkle root.
     func testDifferentPubkeysProduceDifferentAddresses() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
-        let xonlyA = Self.l2XOnly
-        let xonlyB = Data(repeating: 0x66, count: 32)
+        let keyA = try DepositAddress.outputKey(
+            l2XOnly: Self.l2XOnly,
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR
+        )
+        let keyB = try DepositAddress.outputKey(
+            l2XOnly: Data(repeating: 0x66, count: 32),
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR
+        )
+        XCTAssertNotEqual(keyA, keyB, "user_xonly inside leaf B must affect the merkle root")
+    }
 
-        let keyA = try DepositAddress.outputKey(l2XOnly: xonlyA, bridgeRedeemScript: redeem)
-        let keyB = try DepositAddress.outputKey(l2XOnly: xonlyB, bridgeRedeemScript: redeem)
-        XCTAssertNotEqual(keyA, keyB, "per-user salt must affect the merkle root")
+    /// Sanity: changing R changes the reclaim leaf bytes and therefore
+    /// the output key. A misconfigured wallet that uses a different R
+    /// from the operator must fail loudly (i.e. produce a different
+    /// address than what the operator scans for) rather than silently
+    /// route funds to an unscanned address.
+    func testDifferentRProduceDifferentAddresses() throws {
+        let redeem = try Data(hex: Self.bridgeRedeemHex)
+        let keyA = try DepositAddress.outputKey(
+            l2XOnly: Self.l2XOnly,
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR
+        )
+        let keyB = try DepositAddress.outputKey(
+            l2XOnly: Self.l2XOnly,
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR + 1
+        )
+        XCTAssertNotEqual(keyA, keyB, "changing R must change the deposit address")
     }
 
     /// Wrong-length pubkey is rejected with a typed error rather than
-    /// silently producing an address from truncated bytes. 33-byte
-    /// compressed form is the previous shape — it must error so
-    /// callers don't accidentally pass the wrong representation.
+    /// silently producing an address from truncated bytes.
     func testRejectsInvalidPubkeyLength() throws {
         let redeem = try Data(hex: Self.bridgeRedeemHex)
         var compressed = Data([0x02])
         compressed.append(Data(repeating: 0x55, count: 32))
         XCTAssertThrowsError(
-            try DepositAddress.outputKey(l2XOnly: compressed, bridgeRedeemScript: redeem)
+            try DepositAddress.outputKey(
+                l2XOnly: compressed,
+                bridgeRedeemScript: redeem,
+                reclaimR: Self.reclaimR
+            )
         ) { err in
             guard case DepositAddress.Error.invalidL2XOnly = err else {
                 return XCTFail("wrong error: \(err)")

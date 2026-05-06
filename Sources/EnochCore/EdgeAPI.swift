@@ -52,6 +52,14 @@ public struct OperatorInfo: Codable, Equatable {
     /// so older operators (pre-this-field) still decode; wallet falls
     /// back to a network-name guess when nil.
     public let minDepositConfirmations: UInt64?
+    /// Per-user deposit reclaim relative-timelock, in BIP-68 block-
+    /// count units (spec/deposit_address.md). Pinned at federation
+    /// init; the wallet must use the same R the operator used or it
+    /// will derive an address operators don't credit. Optional in the
+    /// wire shape only because pre-Phase-1 operators didn't emit it;
+    /// wallets that must derive a deposit address fail loudly when
+    /// it's missing rather than silently using a wrong R.
+    public let depositReclaimR: UInt32?
     public let currentHeight: UInt64
     public let feeSchedule: FeeSchedule?
 
@@ -69,6 +77,7 @@ public struct OperatorInfo: Codable, Equatable {
         case agentPayoutAddresses = "agent_payout_addresses"
         case withdrawalChallengeWindowL1Blocks = "withdrawal_challenge_window_l1_blocks"
         case minDepositConfirmations = "min_deposit_confirmations"
+        case depositReclaimR = "deposit_reclaim_r"
         case currentHeight = "current_height"
         case feeSchedule = "fee_schedule"
     }
