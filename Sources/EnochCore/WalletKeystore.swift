@@ -196,8 +196,7 @@ public final class InMemoryWalletKeystore: WalletKeystore {
         guard let id = activeID, let e = entries[id] else {
             throw WalletKeystoreError.keyNotFound
         }
-        let tweaked = try e.priv.taprootKeypathTweaked()
-        return try Secp256k1.schnorrSign(digest: digest, privKey: tweaked)
+        return try Secp256k1.signTaprootKeypath(digest: digest, privKey: e.priv)
     }
 
     private func insert(name: String, priv: Secp256k1.PrivateKey) throws -> WalletDescriptor {

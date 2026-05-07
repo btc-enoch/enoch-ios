@@ -17,6 +17,7 @@
 // verifier (btcsuite/btcd/txscript) requires it, so this is
 // load-bearing for tx acceptance.
 
+import EnochCrypto
 import Foundation
 import P256K
 
@@ -199,29 +200,22 @@ public enum Secp256k1 {
     /// signature is what gets pushed as the single-element witness
     /// for a P2TR keypath spend under SIGHASH_DEFAULT.
     ///
-    /// CRITICAL: pass the sighash directly. Same digest-vs-data
-    /// caveat as `signDigest` — we route through the `Digest`
-    /// overload so the bytes are signed as-is, not re-hashed.
-    ///
     /// `privKey` is signed *as-is* — for BIP-341 keypath spends the
-    /// caller is responsible for producing the **tweaked** private
-    /// key (priv + H_TapTweak(pubkey) mod n, with parity-flip if the
-    /// internal pubkey has odd Y). The tweaking helper lives in a
-    /// separate file (Schnorr+Tweak from swift-secp256k1) and will
-    /// be wrapped in a follow-up commit.
+    /// caller produces a **tweaked** private key first (priv +
+    /// H_TapTweak(pubkey) mod n, with parity-flip if the internal
+    /// pubkey has odd Y). The combined tweak+sign helper that
+    /// avoids materializing the tweaked key on the Swift side is
+    /// `signTaprootKeypath` — prefer it when signing keypath sighashes.
+    ///
+    /// Delegates to EnochCrypto (Rust) — uses libsecp256k1's
+    /// sign_schnorr_no_aux_rand for deterministic BIP-340 signing.
     public static func schnorrSign(digest: Data, privKey: PrivateKey) throws -> SchnorrSignature {
         guard digest.count == 32 else {
             throw Error.invalidDigestLength(digest.count)
         }
         do {
-            // P256K's Schnorr.PrivateKey takes raw 32-byte private
-            // scalar. Reuse our existing PrivateKey's rawBytes.
-            let schnorrKey = try P256K.Schnorr.PrivateKey(dataRepresentation: privKey.rawBytes)
-            let hd = HashDigest([UInt8](digest))
-            let sig = try schnorrKey.signature(for: hd)
-            return try SchnorrSignature(bytes: sig.dataRepresentation)
-        } catch let e as secp256k1Error {
-            throw Error.invalidSignature(e)
+            let sig = try EnochCrypto.secpSchnorrSign(sk: privKey.rawBytes, msg32: digest)
+            return try SchnorrSignature(bytes: sig)
         } catch {
             throw Error.invalidSignature(error)
         }
@@ -231,137 +225,108 @@ public enum Secp256k1 {
     /// over a precomputed 32-byte digest. Returns false on any
     /// malformed input (no thrown error — verifiers want a single
     /// boolean).
+    ///
+    /// Delegates to EnochCrypto (Rust) — uses libsecp256k1's
+    /// verify_schnorr.
     public static func schnorrVerify(
         signature: SchnorrSignature,
         digest: Data,
         publicKey: XOnlyPublicKey
     ) -> Bool {
         guard digest.count == 32 else { return false }
-        do {
-            let xonly = P256K.Schnorr.XonlyKey(dataRepresentation: publicKey.bytes, keyParity: 0)
-            let sig = try P256K.Schnorr.SchnorrSignature(dataRepresentation: signature.bytes)
-            let hd = HashDigest([UInt8](digest))
-            return xonly.isValidSignature(sig, for: hd)
-        } catch {
-            return false
-        }
+        return (try? EnochCrypto.secpSchnorrVerify(
+            xonlyPubkey: publicKey.bytes,
+            msg32: digest,
+            sig: signature.bytes
+        )) ?? false
     }
 
     // MARK: - BIP-340 tagged hashes (used by BIP-341 Taproot)
 
     /// Compute a BIP-340 tagged hash: `SHA256(SHA256(tag) ‖ SHA256(tag) ‖ data)`.
     /// Tags used in the Bitcoin Taproot stack: "TapLeaf", "TapBranch",
-    /// "TapTweak", "TapSighash". Routes through libsecp256k1's
-    /// `secp256k1_tagged_sha256` so the output is byte-identical to
-    /// what a libsecp signer would compute for the same (tag, data).
+    /// "TapTweak", "TapSighash". Delegates to EnochCrypto (Rust)
+    /// so the output is byte-identical to what the operator/agent
+    /// computes via the same crate.
     public static func taggedHash(tag: String, data: Data) -> Data {
-        let tagBytes = Data(tag.utf8)
-        // P256K re-exports its own SHA256 namespace at module top
-        // level. Within this file we don't `import CryptoKit`, so
-        // bare `SHA256` resolves to P256K's version (which has the
-        // tagged-hash variant our use-case needs).
-        let digest = SHA256.taggedHash(tag: tagBytes, data: data)
-        return Data(digest)
+        EnochCrypto.taggedHashFfi(tag: Data(tag.utf8), msg: data)
     }
 
-    // MARK: - BIP-341 Taproot keypath tweak
-
-    /// Compute the BIP-341 keypath tweak scalar `t` for a given
-    /// internal pubkey:
-    ///
-    ///     t = SHA256_TapTweak( internal_x_only )    (no script tree)
-    ///
-    /// The tweak is what turns an internal pubkey `P` into a Taproot
-    /// output key `P + t·G`. For keypath-only spends (no tap-script
-    /// tree), the tag-hash data is just the internal x-only pubkey
-    /// — no merkle root concatenation.
-    public static func taprootKeypathTweak(internalXOnly: Data) throws -> Data {
-        guard internalXOnly.count == 32 else {
-            throw Error.invalidXOnlyPublicKeyLength(internalXOnly.count)
-        }
-        return taggedHash(tag: "TapTweak", data: internalXOnly)
-    }
 }
 
 // MARK: - PrivateKey + PublicKey: Taproot keypath helpers
 
+public extension Secp256k1.PrivateKey {
+    /// Convenience: derive this key's BIP-341 keypath output key
+    /// (the x-only key embedded in the user's `enoch1p…` address).
+    /// Equivalent to `publicKey.taprootOutputKey()` — pubkey alone
+    /// is sufficient since the tap-tweak math doesn't depend on
+    /// the secret. The PrivateKey-side overload exists for call
+    /// sites that already have the privkey loaded and prefer the
+    /// shorter form.
+    func taprootOutputKey() throws -> Secp256k1.XOnlyPublicKey {
+        try publicKey.taprootOutputKey()
+    }
+}
+
 public extension Secp256k1.PublicKey {
-    /// Pubkey-only path to the BIP-341 keypath output key. Same
-    /// result as `Secp256k1.PrivateKey.taprootOutputKey()` but
-    /// doesn't require unlocking the privkey via biometric — usable
+    /// Pubkey-only path to the BIP-341 keypath output key.
+    /// Doesn't require unlocking the privkey via biometric — usable
     /// for rendering the wallet's receive address on app launch
     /// without prompting for Face ID.
     ///
-    /// Internally calls libsecp's `secp256k1_xonly_pubkey_tweak_add`
-    /// (via P256K.Schnorr.XonlyKey.add), which lifts the internal
-    /// pubkey to even-Y per BIP-340 and applies the tap-tweak. The
-    /// resulting x-only output key is byte-identical to what the
-    /// privkey-side path produces.
+    /// Delegates to EnochCrypto's taproot_bridge_output_key
+    /// (rust-bitcoin tap_tweak under the hood). Lifts the internal
+    /// pubkey to even-Y per BIP-340, applies the keypath-only
+    /// tap-tweak (no merkle root), serializes as 32-byte x-only.
+    /// Cross-language parity vectors pin the same hex bytes Go's
+    /// federation/frost/keypath emits for the same input.
     func taprootOutputKey() throws -> Secp256k1.XOnlyPublicKey {
         let internalXOnly = try Secp256k1.XOnlyPublicKey.from(compressed: compressedBytes)
-        let tweak = try Secp256k1.taprootKeypathTweak(internalXOnly: internalXOnly.bytes)
-        return try Secp256k1.applyTaprootTweak(internalXOnly: internalXOnly.bytes, tweak: tweak)
+        do {
+            let outBytes = try EnochCrypto.taprootBridgeOutputKey(internalXonly: internalXOnly.bytes)
+            return try Secp256k1.XOnlyPublicKey(bytes: outBytes)
+        } catch {
+            throw Secp256k1.Error.invalidPublicKey(error)
+        }
     }
 }
 
 public extension Secp256k1 {
-    /// Apply a BIP-341 tap-tweak to an x-only internal pubkey,
-    /// returning the tweaked x-only output key. Shared primitive
-    /// used by both the keypath path (where the tweak is just
-    /// `tagged_hash("TapTweak", internal_xonly)`) and the script-path
-    /// path (where the tweak is
-    /// `tagged_hash("TapTweak", internal_xonly || merkle_root)`).
+    /// Sign a BIP-341 P2TR keypath sighash directly from the
+    /// internal (untweaked) private key. Combines tap-tweak +
+    /// Schnorr-sign into one Rust FFI call so the tweaked secret
+    /// key never crosses the FFI boundary — fewer surfaces for
+    /// accidental key exposure on the Swift side. BIP-340
+    /// implicit-even-Y parity flip is handled inside Rust.
     ///
-    /// Caller is responsible for computing the right tweak — this
-    /// function just applies it to the curve. Per BIP-340's
-    /// implicit-even-Y convention, we pass keyParity: 0 so libsecp
-    /// lifts the internal pubkey to its even-Y branch before adding.
-    static func applyTaprootTweak(
-        internalXOnly: Data,
-        tweak: Data
-    ) throws -> XOnlyPublicKey {
+    /// `merkleRoot` is `nil` for keypath-only outputs (no script
+    /// tree — the bridge withdrawal address shape) and a 32-byte
+    /// merkle root for outputs with a tap-tree (per-user deposit
+    /// address — reclaim leaf in the tree). Caller computes the
+    /// merkle root; this function tweaks + signs.
+    ///
+    /// Returns the 64-byte BIP-340 Schnorr signature suitable for
+    /// the witness stack of a P2TR keypath spend under
+    /// SIGHASH_DEFAULT.
+    static func signTaprootKeypath(
+        digest: Data,
+        privKey: PrivateKey,
+        merkleRoot: Data? = nil
+    ) throws -> SchnorrSignature {
+        guard digest.count == 32 else {
+            throw Error.invalidDigestLength(digest.count)
+        }
         do {
-            let xonly = P256K.Schnorr.XonlyKey(
-                dataRepresentation: internalXOnly,
-                keyParity: 0
+            let sig = try EnochCrypto.taprootSchnorrSignKeypath(
+                sk: privKey.rawBytes,
+                msg32: digest,
+                merkleRoot: merkleRoot
             )
-            let tweaked = try xonly.add([UInt8](tweak))
-            return try XOnlyPublicKey(bytes: Data(tweaked.bytes))
-        } catch let e as secp256k1Error {
-            throw Error.invalidPublicKey(e)
+            return try SchnorrSignature(bytes: sig)
         } catch {
-            throw Error.invalidPublicKey(error)
+            throw Error.invalidSignature(error)
         }
-    }
-}
-
-public extension Secp256k1.PrivateKey {
-    /// Returns the BIP-341 keypath-tweaked private key — the scalar
-    /// the wallet signs with for a P2TR keypath spend. Internally
-    /// this routes through libsecp256k1's `secp256k1_keypair_xonly_tweak_add`,
-    /// which handles the BIP-340 "implicit even Y" parity flip on
-    /// the internal key automatically (negates the scalar if the
-    /// internal pubkey has odd Y, then adds the tweak).
-    func taprootKeypathTweaked() throws -> Secp256k1.PrivateKey {
-        let internalXOnly = try Secp256k1.XOnlyPublicKey.from(compressed: publicKey.compressedBytes)
-        let tweak = try Secp256k1.taprootKeypathTweak(internalXOnly: internalXOnly.bytes)
-        do {
-            let schnorrPriv = try P256K.Schnorr.PrivateKey(dataRepresentation: rawBytes)
-            let tweaked = try schnorrPriv.add([UInt8](tweak))
-            return try Secp256k1.PrivateKey(rawBytes: tweaked.dataRepresentation)
-        } catch let e as secp256k1Error {
-            throw Secp256k1.Error.invalidSignature(e)
-        }
-    }
-
-    /// The Taproot output key (x-only) for a keypath-only spend.
-    /// This is what gets bech32m-encoded into the user's `enoch1p...`
-    /// address. The tweak math goes through libsecp256k1, so the
-    /// output here is byte-identical to what `taprootKeypathTweaked()`
-    /// produces a private key for.
-    func taprootOutputKey() throws -> Secp256k1.XOnlyPublicKey {
-        let tweakedPriv = try taprootKeypathTweaked()
-        return try Secp256k1.XOnlyPublicKey.from(compressed: tweakedPriv.publicKey.compressedBytes)
     }
 }
 

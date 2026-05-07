@@ -142,19 +142,18 @@ final class Secp256k1Tests: XCTestCase {
         XCTAssertFalse(Secp256k1.schnorrVerify(signature: sig, digest: digest, publicKey: bobXonly))
     }
 
-    /// Schnorr signatures are deterministic per BIP-340 with zero
-    /// auxiliary randomness, but the swift-secp256k1 default mixes
-    /// in fresh randomness — so two signatures of the same digest
-    /// SHOULD differ. (If this ever flips to deterministic, the
-    /// signature is still valid; this test just documents the
-    /// current property.)
-    func testSchnorrAuxRandomnessProducesDifferentSigs() throws {
+    /// Schnorr signing is deterministic — BIP-340 §"Default Signing"
+    /// with aux_rand = NULL. Same (sk, msg) → same sig, every time.
+    /// Same property libsecp's secp256k1_schnorrsig_sign produces
+    /// when aux_rand is null, the operator-side btcsuite produces,
+    /// and what every BIP-340 reference vector pins.
+    func testSchnorrSigningDeterministic() throws {
         let priv = try Secp256k1.PrivateKey()
         let digest = Data(repeating: 0x01, count: 32)
         let sig1 = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
         let sig2 = try Secp256k1.schnorrSign(digest: digest, privKey: priv)
-        XCTAssertNotEqual(sig1.bytes, sig2.bytes,
-                          "default signing path mixes in aux randomness; sigs must differ")
+        XCTAssertEqual(sig1.bytes, sig2.bytes,
+                       "BIP-340 deterministic signing — same (sk,msg) MUST produce same sig")
     }
 
     /// X-only key has the right shape: 32 bytes, derived from the
@@ -205,36 +204,21 @@ final class Secp256k1Tests: XCTestCase {
         XCTAssertNotEqual(h1, h4)
     }
 
-    /// Round-trip: derive the Taproot tweak from an internal pubkey,
-    /// apply it to both the privkey and the pubkey, and confirm the
-    /// resulting tweaked privkey's public key equals the tweaked
-    /// pubkey. This is the load-bearing property of BIP-341 keypath
-    /// — sk' and xonly' must form a valid keypair.
-    func testTaprootKeypathTweakConsistency() throws {
-        let priv = try Secp256k1.PrivateKey()
-        let tweakedPriv = try priv.taprootKeypathTweaked()
-        let outputKey = try priv.taprootOutputKey()
-
-        // The tweaked privkey's pubkey x-only form must match the
-        // computed output key.
-        let tweakedXOnly = try Secp256k1.XOnlyPublicKey.from(compressed: tweakedPriv.publicKey.compressedBytes)
-        XCTAssertEqual(tweakedXOnly.bytes, outputKey.bytes)
-    }
-
-    /// BIP-341 keypath sign + verify: sign with the tweaked privkey,
-    /// verify against the tweaked output key. This is exactly what a
-    /// P2TR keypath spend does.
+    /// BIP-341 keypath sign + verify: signTaprootKeypath performs
+    /// the tap-tweak + Schnorr sign in one Rust FFI call; the
+    /// resulting signature MUST verify under the tap-tweaked
+    /// output key. This is exactly what a P2TR keypath spend does.
     func testTaprootKeypathSignVerify() throws {
         let priv = try Secp256k1.PrivateKey()
-        let tweakedPriv = try priv.taprootKeypathTweaked()
         let outputKey = try priv.taprootOutputKey()
 
         let sighash = Data(repeating: 0xAA, count: 32)
-        let sig = try Secp256k1.schnorrSign(digest: sighash, privKey: tweakedPriv)
+        let sig = try Secp256k1.signTaprootKeypath(digest: sighash, privKey: priv)
         XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig, digest: sighash, publicKey: outputKey))
 
-        // Negative: signing with the *untweaked* privkey must NOT
-        // verify against the tweaked output key.
+        // Negative: signing with the untweaked privkey via plain
+        // schnorrSign (no tap-tweak) must NOT verify against the
+        // tweaked output key.
         let badSig = try Secp256k1.schnorrSign(digest: sighash, privKey: priv)
         XCTAssertFalse(Secp256k1.schnorrVerify(signature: badSig, digest: sighash, publicKey: outputKey))
     }

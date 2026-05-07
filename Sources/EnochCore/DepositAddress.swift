@@ -26,6 +26,7 @@
 // (BIP-68 sequence; OP_CSV enforces). Mirrors
 // federation/depositaddr/depositaddr.go byte-for-byte.
 
+import EnochCrypto
 import Foundation
 
 public enum DepositAddress {
@@ -257,16 +258,11 @@ public enum DepositAddress {
         let merkleRoot = tapBranchHash(hBridge, hReclaim)
 
         let numsXOnly = try Data(hex: numsXOnlyHex)
-        var tweakInput = Data()
-        tweakInput.append(numsXOnly)
-        tweakInput.append(merkleRoot)
-        let tweak = Secp256k1.taggedHash(tag: "TapTweak", data: tweakInput)
-
         do {
-            let outKey = try Secp256k1.applyTaprootTweak(
-                internalXOnly: numsXOnly, tweak: tweak
+            return try EnochCrypto.taprootTweakedOutputKey(
+                internalXonly: numsXOnly,
+                merkleRoot: merkleRoot
             )
-            return outKey.bytes
         } catch {
             throw Error.crypto(String(describing: error))
         }

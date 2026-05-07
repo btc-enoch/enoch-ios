@@ -232,8 +232,7 @@ public final class KeychainWalletKeystore: WalletKeystore {
 
     private func signTaprootKeypathSync(digest: Data, prompt: String) throws -> Secp256k1.SchnorrSignature {
         let key = try loadActivePrivateKeyWithBiometric(prompt: prompt)
-        let tweaked = try key.taprootKeypathTweaked()
-        return try Secp256k1.schnorrSign(digest: digest, privKey: tweaked)
+        return try Secp256k1.signTaprootKeypath(digest: digest, privKey: key)
     }
 
     private func signSync(digest: Data, prompt: String) throws -> Secp256k1.Signature {

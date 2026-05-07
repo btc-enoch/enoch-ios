@@ -25,8 +25,7 @@ final class TxBIP341SighashTests: XCTestCase {
         let sighash = try tx.sighashBIP341Keypath(inputIndex: 0, prevouts: prevouts)
         XCTAssertEqual(sighash.count, 32)
 
-        let tweakedPriv = try priv.taprootKeypathTweaked()
-        let sig = try Secp256k1.schnorrSign(digest: sighash, privKey: tweakedPriv)
+        let sig = try Secp256k1.signTaprootKeypath(digest: sighash, privKey: priv)
         XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig, digest: sighash, publicKey: outputKey),
                       "P2TR keypath sig must verify against tweaked output key")
     }
@@ -60,11 +59,11 @@ final class TxBIP341SighashTests: XCTestCase {
         XCTAssertNotEqual(sighashIn0, sighashIn1,
                           "different input_index → different sighash (BIP-341 commits to it)")
 
-        // Sign each input with its own tweaked key; both must verify.
-        let aliceTweaked = try alice.taprootKeypathTweaked()
-        let bobTweaked   = try bob.taprootKeypathTweaked()
-        let sig0 = try Secp256k1.schnorrSign(digest: sighashIn0, privKey: aliceTweaked)
-        let sig1 = try Secp256k1.schnorrSign(digest: sighashIn1, privKey: bobTweaked)
+        // Sign each input with its internal privkey; the unified
+        // signTaprootKeypath does the tap-tweak inside Rust, so the
+        // resulting signatures verify under the tweaked output keys.
+        let sig0 = try Secp256k1.signTaprootKeypath(digest: sighashIn0, privKey: alice)
+        let sig1 = try Secp256k1.signTaprootKeypath(digest: sighashIn1, privKey: bob)
         XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig0, digest: sighashIn0, publicKey: aliceOut))
         XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig1, digest: sighashIn1, publicKey: bobOut))
 
