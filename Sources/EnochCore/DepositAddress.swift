@@ -235,11 +235,11 @@ public enum DepositAddress {
         return out
     }
 
-    /// Compute the 32-byte x-only Taproot output key for a per-user
-    /// deposit address. Reclaim-spend construction (control blocks
-    /// with parity bits) lands in a follow-up commit alongside the
-    /// reclaim signing flow.
-    public static func outputKey(
+    /// Compute the 32-byte tap-tree merkle root binding leaf A
+    /// (federation M-of-N sweep) and leaf B (user reclaim with
+    /// CSV). Both `outputKey` and `derive` need it; isolating the
+    /// derivation here keeps the two callers from drifting.
+    private static func merkleRoot(
         l2XOnly: Data,
         bridgeRedeemScript: Data,
         reclaimR R: UInt32
@@ -255,13 +255,28 @@ public enum DepositAddress {
 
         let hBridge = tapLeafHash(bridgeLeaf)
         let hReclaim = tapLeafHash(reclaimLeaf)
-        let merkleRoot = tapBranchHash(hBridge, hReclaim)
+        return tapBranchHash(hBridge, hReclaim)
+    }
 
+    /// Compute the 32-byte x-only Taproot output key for a per-user
+    /// deposit address. Reclaim-spend construction (control blocks
+    /// with parity bits) lands in a follow-up commit alongside the
+    /// reclaim signing flow.
+    public static func outputKey(
+        l2XOnly: Data,
+        bridgeRedeemScript: Data,
+        reclaimR R: UInt32
+    ) throws -> Data {
+        let root = try merkleRoot(
+            l2XOnly: l2XOnly,
+            bridgeRedeemScript: bridgeRedeemScript,
+            reclaimR: R
+        )
         let numsXOnly = try Data(hex: numsXOnlyHex)
         do {
             return try EnochCrypto.taprootTweakedOutputKey(
                 internalXonly: numsXOnly,
-                merkleRoot: merkleRoot
+                merkleRoot: root
             )
         } catch {
             throw Error.crypto(String(describing: error))
@@ -275,6 +290,11 @@ public enum DepositAddress {
     /// `bridgeRedeemScriptHex` comes from `/v1/info`'s
     /// `bridge_redeem_script` field. `reclaimR` is the federation's
     /// pinned reclaim relative-timelock (also from `/v1/info`).
+    ///
+    /// Routes the witness-v1 + bech32m segwit encoding through Rust
+    /// EnochCrypto's address_p2tr (rust-bitcoin Address::p2tr under
+    /// the hood). Single source of truth for the tweak math AND the
+    /// address string.
     public static func derive(
         l2XOnly: Data,
         bridgeRedeemScriptHex: String,
@@ -288,24 +308,31 @@ public enum DepositAddress {
             throw Error.invalidRedeemScriptHex
         }
 
-        let outKey = try outputKey(
+        let root = try merkleRoot(
             l2XOnly: l2XOnly,
             bridgeRedeemScript: bridgeRedeem,
             reclaimR: R
         )
-
+        let numsXOnly = try Data(hex: numsXOnlyHex)
         do {
-            let prog = try Bech32.convertBits(
-                [UInt8](outKey), from: 8, to: 5, pad: true
+            return try EnochCrypto.addressP2tr(
+                internalXonly: numsXOnly,
+                merkleRoot: root,
+                network: networkRustString(network)
             )
-            let payload: [UInt8] = [1] + prog
-            return try Bech32.encode(
-                hrp: network.rawValue,
-                data: payload,
-                variant: .bech32m
-            )
-        } catch let e as Bech32.Error {
-            throw Error.bech32(String(describing: e))
+        } catch {
+            throw Error.crypto(String(describing: error))
+        }
+    }
+
+    /// Map our Network enum (which carries the bech32m HRP for
+    /// presentation) to the network-name strings Rust's
+    /// EnochCrypto.address* functions accept.
+    private static func networkRustString(_ n: Network) -> String {
+        switch n {
+        case .mainnet: return "mainnet"
+        case .testnet: return "testnet"
+        case .regtest: return "regtest"
         }
     }
 
