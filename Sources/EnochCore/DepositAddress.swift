@@ -325,6 +325,84 @@ public enum DepositAddress {
         }
     }
 
+    // MARK: - Slice 7b: keypath-shape derivation
+    //
+    // FROST stage 7 changes the per-user deposit address shape:
+    //   internal_key  = FROST aggregate verifying-key x-only
+    //                   (was: NUMS unspendable point)
+    //   tap_tree      = [reclaim_leaf]            // single leaf
+    //                   (was: [bridge_multisig_leaf, reclaim_leaf])
+    //   merkle_root   = TapLeaf(reclaim_leaf)
+    //                   (was: TapBranch(min(H_bridge,H_reclaim) ||
+    //                                    max(H_bridge,H_reclaim)))
+    //
+    // The federation sweep is now a P2TR keypath spend (single
+    // 64B FROST signature in the witness) instead of a 7-element
+    // CHECKSIGADD multisig script-path. Reclaim leaf shape is
+    // unchanged — user recovery stays trustless and shape-stable.
+    //
+    // Cross-language parity: federation/depositaddr/keypath.go
+    // produces byte-identical addresses for the same inputs;
+    // pinned in DepositAddressTests + Go's keypath_test.go.
+
+    /// Derive the keypath-shape per-user deposit address.
+    ///
+    /// `frostInternalXOnly` is the 32-byte x-only verifying key of
+    /// the federation's FROST PKP — passed in from `/v1/info`'s
+    /// `frost_internal_xonly` field (added when the operator
+    /// cuts over to the keypath shape in slice 7d). `l2XOnly` is
+    /// the user's 32-byte x-only L2 identity key. `R` is the
+    /// reclaim relative-timelock (BIP-68 block-count).
+    ///
+    /// Routes the BIP-341 tap-tweak + bech32m encoding through
+    /// EnochCrypto.addressP2tr — single source of truth shared
+    /// with the operator/agent (Go side via keypath.go).
+    public static func deriveKeypath(
+        l2XOnly: Data,
+        frostInternalXOnly: Data,
+        reclaimR R: UInt32,
+        network: Network
+    ) throws -> String {
+        guard frostInternalXOnly.count == 32 else {
+            throw Error.invalidL2XOnly(byteCount: frostInternalXOnly.count)
+        }
+        let reclaimLeaf = try buildReclaimLeafScript(userXOnly: l2XOnly, reclaimR: R)
+        let merkleRoot = tapLeafHash(reclaimLeaf)
+        do {
+            return try EnochCrypto.addressP2tr(
+                internalXonly: frostInternalXOnly,
+                merkleRoot: merkleRoot,
+                network: networkRustString(network)
+            )
+        } catch {
+            throw Error.crypto(String(describing: error))
+        }
+    }
+
+    /// Compute the 32-byte x-only Taproot output key for the
+    /// keypath-shape per-user deposit address. Used by callers
+    /// that need just the witness-program bytes (e.g., recipient
+    /// scriptPubKey construction) without the bech32m wrapping.
+    public static func outputKeyKeypath(
+        l2XOnly: Data,
+        frostInternalXOnly: Data,
+        reclaimR R: UInt32
+    ) throws -> Data {
+        guard frostInternalXOnly.count == 32 else {
+            throw Error.invalidL2XOnly(byteCount: frostInternalXOnly.count)
+        }
+        let reclaimLeaf = try buildReclaimLeafScript(userXOnly: l2XOnly, reclaimR: R)
+        let merkleRoot = tapLeafHash(reclaimLeaf)
+        do {
+            return try EnochCrypto.taprootTweakedOutputKey(
+                internalXonly: frostInternalXOnly,
+                merkleRoot: merkleRoot
+            )
+        } catch {
+            throw Error.crypto(String(describing: error))
+        }
+    }
+
     /// Map our Network enum (which carries the bech32m HRP for
     /// presentation) to the network-name strings Rust's
     /// EnochCrypto.address* functions accept.

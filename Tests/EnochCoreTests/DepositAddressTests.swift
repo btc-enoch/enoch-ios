@@ -140,4 +140,104 @@ final class DepositAddressTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Slice 7b: keypath-shape parity vectors
+    //
+    // Same l2XOnly + R as the legacy fixtures above, plus a fixed
+    // FROST aggregate verifying-key x-only. Expected outputs are
+    // pinned in federation/depositaddr/parity.go — drift on any
+    // side fails one of the test suites loud.
+
+    /// FROST aggregate verifying-key x-only — same value pinned in
+    /// spec/frost_keypath.md, federation/frost/keypath/keypath_test.go,
+    /// and federation/depositaddr/parity.go (ParityFrostInternalXOnlyHex).
+    /// Derived from GenerateWithDealerSeededJSON(seed=0x01..0x20,
+    /// max=5, min=3).
+    private static let frostInternalXOnlyHex =
+        "86ae0bde3ef5e9ace70a50735482c58ffb618dc82a5f9d7daea5c33fe4faba23"
+
+    /// Pinned bytes from federation/depositaddr/parity.go's
+    /// ExpectedKeypath*. Drift here vs Go = the iOS wallet would
+    /// compute a different deposit address than the operator's
+    /// registry, silently fund-losing.
+    private static let expectedKeypathOutputKeyHex =
+        "70ea16c8e46865b41474596042fb74df9c806de90dcf94c01d32fac384c34394"
+    private static let expectedKeypathRegtestAddr =
+        "bcrt1pwr4pdj8ydpjmg9r5t9sy97m5m7wgqm0fph8efsqaxtav8pxrgw2q0e0ww2"
+    private static let expectedKeypathMainnetAddr =
+        "bc1pwr4pdj8ydpjmg9r5t9sy97m5m7wgqm0fph8efsqaxtav8pxrgw2q4gn8pl"
+
+    func testKeypathOutputKeyMatchesGoParityVector() throws {
+        let frostInternal = try Data(hex: Self.frostInternalXOnlyHex)
+        let outputKey = try DepositAddress.outputKeyKeypath(
+            l2XOnly: Self.l2XOnly,
+            frostInternalXOnly: frostInternal,
+            reclaimR: Self.reclaimR
+        )
+        XCTAssertEqual(outputKey.count, 32)
+        XCTAssertEqual(
+            outputKey.map { String(format: "%02x", $0) }.joined(),
+            Self.expectedKeypathOutputKeyHex,
+            "Swift keypath output_key must match Go's byte-for-byte"
+        )
+    }
+
+    func testKeypathRegtestAddressMatchesGoParityVector() throws {
+        let frostInternal = try Data(hex: Self.frostInternalXOnlyHex)
+        let addr = try DepositAddress.deriveKeypath(
+            l2XOnly: Self.l2XOnly,
+            frostInternalXOnly: frostInternal,
+            reclaimR: Self.reclaimR,
+            network: .regtest
+        )
+        XCTAssertEqual(addr, Self.expectedKeypathRegtestAddr)
+        XCTAssertTrue(addr.hasPrefix("bcrt1p"), "regtest Taproot addresses start with bcrt1p")
+    }
+
+    func testKeypathMainnetAddressMatchesGoParityVector() throws {
+        let frostInternal = try Data(hex: Self.frostInternalXOnlyHex)
+        let addr = try DepositAddress.deriveKeypath(
+            l2XOnly: Self.l2XOnly,
+            frostInternalXOnly: frostInternal,
+            reclaimR: Self.reclaimR,
+            network: .mainnet
+        )
+        XCTAssertEqual(addr, Self.expectedKeypathMainnetAddr)
+        XCTAssertTrue(addr.hasPrefix("bc1p"), "mainnet Taproot addresses start with bc1p")
+    }
+
+    /// Sanity: keypath shape must produce a DIFFERENT address from
+    /// the legacy NUMS-internal shape for the same user — the cutover
+    /// is a real protocol-level change, not a no-op rename.
+    func testKeypathShapeDiffersFromLegacyShape() throws {
+        let frostInternal = try Data(hex: Self.frostInternalXOnlyHex)
+        let redeem = try Data(hex: Self.bridgeRedeemHex)
+        let legacy = try DepositAddress.outputKey(
+            l2XOnly: Self.l2XOnly,
+            bridgeRedeemScript: redeem,
+            reclaimR: Self.reclaimR
+        )
+        let keypath = try DepositAddress.outputKeyKeypath(
+            l2XOnly: Self.l2XOnly,
+            frostInternalXOnly: frostInternal,
+            reclaimR: Self.reclaimR
+        )
+        XCTAssertNotEqual(legacy, keypath, "keypath shape must differ from legacy NUMS-internal shape")
+    }
+
+    func testKeypathRejectsInvalidFrostInternalLength() throws {
+        // 31 bytes — too short.
+        let bad = Data(repeating: 0xab, count: 31)
+        XCTAssertThrowsError(
+            try DepositAddress.outputKeyKeypath(
+                l2XOnly: Self.l2XOnly,
+                frostInternalXOnly: bad,
+                reclaimR: Self.reclaimR
+            )
+        ) { err in
+            guard case DepositAddress.Error.invalidL2XOnly = err else {
+                return XCTFail("wrong error type: \(err)")
+            }
+        }
+    }
 }
