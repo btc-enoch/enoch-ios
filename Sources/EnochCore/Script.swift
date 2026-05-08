@@ -1,48 +1,25 @@
-// Script — minimal Bitcoin Script builders the wallet needs to
-// construct user-money outputs and inputs.
+// Script — Bitcoin Script builders the wallet needs to construct
+// withdrawal-burn outputs and P2TR script-pubkeys.
 //
-// Pre-#109 (legacy): P2PKH everywhere — `p2pkhScriptPubKey` for
-// outputs, `p2pkhScriptSig` for inputs. Mirrors the operator's
-// `BuildP2PKHScript`.
+// Post-#109 + #197 (rust-bitcoin migration Phase 5):
+//   - taprootScriptPubKey routes through EnochCrypto's
+//     scriptpubkeyP2tr FFI (rust-bitcoin source of truth)
+//   - opReturnBurn stays Swift-side (mechanical OP_RETURN +
+//     length-prefixed UTF-8 payload, settled spec)
 //
-// Post-#109: P2TR keypath spends — `taprootScriptPubKey` for
-// outputs, witness construction handled in TxBuilder (Schnorr sig
-// in a single-element witness, no scriptSig). The two paths
-// coexist during the migration window; once #109 + B6 ship, the
-// P2PKH builders are dead code and can be removed.
+// Pre-#109 P2PKH builders (p2pkhScriptPubKey / p2pkhScriptSig)
+// were removed in Phase 8 of #191 — fully unused after the
+// L2-wallet P2TR migration landed.
 
 import Foundation
 import EnochCrypto
 
 public enum ScriptError: Swift.Error, Equatable {
-    case wrongPKHLength(Int)
-    case wrongCompressedPubKeyLength(Int)
-    case sigPushTooLong(Int)
     case burnPayloadTooLong(Int)
     case wrongOutputKeyLength(Int)
 }
 
 public enum Script {
-    /// P2PKH scriptPubKey:
-    ///
-    ///   OP_DUP OP_HASH160 <push 20> <pkh> OP_EQUALVERIFY OP_CHECKSIG
-    ///   76     a9         14         ...        88            ac
-    ///
-    /// Always exactly 25 bytes. This is what we put in tx outputs;
-    /// the operator's storage-side scanner uses the same opcode
-    /// pattern to decide which UTXOs are P2PKH-and-therefore-
-    /// spendable-by-pkh.
-    public static func p2pkhScriptPubKey(pkh: Data) throws -> Data {
-        guard pkh.count == 20 else {
-            throw ScriptError.wrongPKHLength(pkh.count)
-        }
-        var out = Data(capacity: 25)
-        out.append(contentsOf: [0x76, 0xA9, 0x14])
-        out.append(pkh)
-        out.append(contentsOf: [0x88, 0xAC])
-        return out
-    }
-
     /// OP_RETURN withdrawal-burn output:
     ///
     ///   OP_RETURN <push N> "ENOCH:WD:<btc_addr>"
@@ -69,30 +46,6 @@ public enum Script {
         return out
     }
 
-    /// P2PKH scriptSig:
-    ///
-    ///   <push N> <DER+sighash> <push 33> <compressed pubkey>
-    ///
-    /// The sigPushBytes already has the SIGHASH_ALL byte appended (use
-    /// `Secp256k1.Signature.derWithSighashAll`). We use direct-push
-    /// length bytes (1..75) rather than OP_PUSHDATA1+; valid DER
-    /// signatures are at most 73 bytes including the sighash byte,
-    /// well below the 75-byte direct-push ceiling.
-    public static func p2pkhScriptSig(sigWithSighashType: Data, compressedPubKey: Data) throws -> Data {
-        guard compressedPubKey.count == 33 else {
-            throw ScriptError.wrongCompressedPubKeyLength(compressedPubKey.count)
-        }
-        guard sigWithSighashType.count >= 1, sigWithSighashType.count <= 75 else {
-            throw ScriptError.sigPushTooLong(sigWithSighashType.count)
-        }
-        var out = Data(capacity: 1 + sigWithSighashType.count + 1 + 33)
-        out.append(UInt8(sigWithSighashType.count))
-        out.append(sigWithSighashType)
-        out.append(0x21) // direct-push 33 bytes
-        out.append(compressedPubKey)
-        return out
-    }
-
     /// P2TR scriptPubKey (witness version 1, BIP-341):
     ///
     ///   OP_1 <push 32> <x-only output key>
@@ -104,24 +57,14 @@ public enum Script {
     /// post-#109, keypath-only is the standard form (no script
     /// trees on user-money UTXOs).
     ///
-    /// Phase 4 of #191: routes through EnochCrypto's
-    /// `scriptpubkeyP2tr`. The hand-rolled fallback below stays as
-    /// a safety net during the migration window — if the FFI call
-    /// errors (which it shouldn't for a 32-byte input), we still
-    /// produce the same bytes the way Bitcoin Script defines them.
+    /// Routes through EnochCrypto's scriptpubkeyP2tr (rust-bitcoin
+    /// source of truth per #191 Phase 4). Length validation stays
+    /// Swift-side so callers preserve the
+    /// `ScriptError.wrongOutputKeyLength` contract.
     public static func taprootScriptPubKey(outputKey: Data) throws -> Data {
         guard outputKey.count == 32 else {
             throw ScriptError.wrongOutputKeyLength(outputKey.count)
         }
-        if let viaFFI = try? scriptpubkeyP2tr(outputXonly: outputKey) {
-            return viaFFI
-        }
-        // Fallback hand-rolled path (only reached if FFI throws,
-        // which the length check above already guards against).
-        var out = Data(capacity: 34)
-        out.append(0x51) // OP_1 (witness version)
-        out.append(0x20) // direct-push 32 bytes
-        out.append(outputKey)
-        return out
+        return try scriptpubkeyP2tr(outputXonly: outputKey)
     }
 }
