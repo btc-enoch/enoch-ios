@@ -110,6 +110,14 @@ public struct WithdrawalStatusPayload: Codable, Equatable {
 /// edge filter already restricts the stream to events for the
 /// wallet's address, but consumers should still match by recipient
 /// before rendering UI to be safe.
+///
+/// `state` is the operator's lifecycle state for the deposit (#158
+/// Phase 4): "detected", "confirming", "signature_pending",
+/// "sweeping", "swept". Decoded as a String so unknown future values
+/// from a newer operator don't crash the wallet — UI maps via
+/// `DepositLifecycleStage` and falls back to a generic stage on
+/// unknown values. Optional for backward compat with older
+/// operators that don't emit it.
 public struct DepositPendingPayload: Codable, Equatable {
     public let recipient: String
     public let btcTxID: String
@@ -118,6 +126,7 @@ public struct DepositPendingPayload: Codable, Equatable {
     public let confirmations: Int
     public let bitcoinHeight: UInt64
     public let perUser: Bool
+    public let state: String?
 
     enum CodingKeys: String, CodingKey {
         case recipient
@@ -127,6 +136,7 @@ public struct DepositPendingPayload: Codable, Equatable {
         case confirmations
         case bitcoinHeight = "bitcoin_height"
         case perUser = "per_user"
+        case state
     }
 }
 

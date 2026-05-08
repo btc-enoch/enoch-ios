@@ -132,21 +132,48 @@ private struct PendingDepositRow: View {
         }
     }
 
+    /// Six-stage progress bar (#158 Phase 4): each stage advances
+    /// the indicator another step toward the eventual `deposit_minted`
+    /// that clears the row.
+    ///
+    /// During the early `detected`/`confirming` stages the bar tracks
+    /// confirmation count; once the federation has the mint sig
+    /// (`signature_pending` and beyond) the stage itself drives the
+    /// bar so users see continuous progress through sweep/credit
+    /// even though the L1 deposit UTXO has been spent.
     private var progress: Double {
-        guard target > 0 else { return 1 }
-        return min(1, Double(deposit.confirmations) / Double(target))
+        switch deposit.stage {
+        case .detected, .confirming:
+            guard target > 0 else { return 0 }
+            // Confirmations contribute to the first half of the bar.
+            return min(0.5, 0.5 * Double(deposit.confirmations) / Double(target))
+        case .signaturePending: return 0.6
+        case .sweeping:         return 0.8
+        case .swept:            return 0.95
+        }
     }
 
+    /// Stage-specific copy. Falls back to the original confs string
+    /// on the early stages so users in the long-confirmation window
+    /// still see the numeric progress they're used to.
     private var statusText: String {
-        // Operator keeps emitting deposit_pending each watcher tick
-        // until the mint applies, so confirmations can exceed the
-        // target between "ready to sign" and "mint applied". Clamp
-        // the displayed numerator so the count doesn't visibly run
-        // past the target — once the user sees "1/1" they know the
-        // bridge is doing its work, the next state is the row
-        // disappearing on deposit_minted.
-        let shown = min(deposit.confirmations, target)
-        return "\(shown)/\(target) confirmations"
+        switch deposit.stage {
+        case .detected:
+            return "Detected on Bitcoin"
+        case .confirming:
+            // Confirmations can exceed target between "ready to sign"
+            // and the federation actually starting the FROST round.
+            // Clamp so users don't see "9/6 confs" — the next stage
+            // (signaturePending) will replace this text shortly.
+            let shown = min(deposit.confirmations, target)
+            return "\(shown)/\(target) confirmations"
+        case .signaturePending:
+            return "Federation approving"
+        case .sweeping:
+            return "Securing custody"
+        case .swept:
+            return "Crediting your balance"
+        }
     }
 }
 

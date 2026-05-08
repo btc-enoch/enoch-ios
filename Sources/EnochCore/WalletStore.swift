@@ -111,12 +111,54 @@ public final class WalletStore {
     /// `confirmations` because the wire shape is signed (the operator
     /// caps at zero so the UI never has to deal with negatives, but
     /// we keep the type honest).
+    ///
+    /// `stage` is the operator's lifecycle classification (#158
+    /// Phase 4) — wallets render distinct UX for each stage instead
+    /// of one coarse "pending" pill. Defaults to `.detected` when the
+    /// operator omits the field (older operator on the other end).
     public struct PendingDepositUI: Equatable {
         public let btcTxID: String
         public let vout: UInt32
         public let amountSatoshi: UInt64
         public let confirmations: Int
         public let perUser: Bool
+        public let stage: DepositLifecycleStage
+    }
+
+    /// Six-state lifecycle the operator drives a deposit through.
+    /// Wire string matches operator/state.go DepositState constants.
+    /// Decoded from the optional `state` field on `deposit_pending`
+    /// events so older operators that don't emit it degrade
+    /// gracefully (`.detected` is the safe fallback).
+    public enum DepositLifecycleStage: String, Equatable, CaseIterable {
+        case detected         = "detected"
+        case confirming       = "confirming"
+        case signaturePending = "signature_pending"
+        case sweeping         = "sweeping"
+        case swept            = "swept"
+
+        /// Numeric ordering for "later than" comparisons. Used in the
+        /// wallet to ignore out-of-order events (a stale `detected`
+        /// arriving after `swept` shouldn't regress the UI).
+        public var rank: Int {
+            switch self {
+            case .detected:         return 0
+            case .confirming:       return 1
+            case .signaturePending: return 2
+            case .sweeping:         return 3
+            case .swept:            return 4
+            }
+        }
+
+        /// Lossy decode: anything we don't recognise (forward-compat
+        /// with future operator stages) maps to `.detected` so the
+        /// wallet keeps rendering instead of crashing.
+        public static func parse(_ wire: String?) -> DepositLifecycleStage {
+            guard let wire, let stage = DepositLifecycleStage(rawValue: wire) else {
+                return .detected
+            }
+            return stage
+        }
     }
 
     /// Convenience: the operator's flat per-tx L2 fee, or nil if
@@ -532,16 +574,31 @@ public final class WalletStore {
             // L1 deposit detected at our per-user address; mint
             // hasn't applied yet. Re-emitted on each watcher tick so
             // the confirmation count advances toward the agent's
-            // signing threshold — last write wins by design.
+            // signing threshold AND the lifecycle stage advances
+            // through detected → confirming → signature_pending →
+            // sweeping → swept (#158 Phase 4).
+            //
+            // Stage advances are monotonic — if a stale event arrives
+            // after a newer one (rare, but possible across SSE
+            // reconnects), the older stage is dropped so the UI
+            // doesn't regress.
             if let payload = event.asDepositPending(), payload.recipient == address {
+                let stage = DepositLifecycleStage.parse(payload.state)
                 let pd = PendingDepositUI(
                     btcTxID: payload.btcTxID,
                     vout: payload.vout,
                     amountSatoshi: payload.amountSatoshi,
                     confirmations: payload.confirmations,
-                    perUser: payload.perUser
+                    perUser: payload.perUser,
+                    stage: stage
                 )
-                updateActive { $0.pendingDeposits[payload.btcTxID] = pd }
+                updateActive { state in
+                    if let existing = state.pendingDeposits[payload.btcTxID],
+                       existing.stage.rank > stage.rank {
+                        return // ignore out-of-order regression
+                    }
+                    state.pendingDeposits[payload.btcTxID] = pd
+                }
             }
         case .depositMinted:
             // Mint applied — clear the pending pill, then refresh
