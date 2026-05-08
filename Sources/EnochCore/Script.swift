@@ -12,6 +12,7 @@
 // P2PKH builders are dead code and can be removed.
 
 import Foundation
+import EnochCrypto
 
 public enum ScriptError: Swift.Error, Equatable {
     case wrongPKHLength(Int)
@@ -102,10 +103,21 @@ public enum Script {
     /// `internal_key + H_TapTweak(internal_key) · G`. For Enoch L2
     /// post-#109, keypath-only is the standard form (no script
     /// trees on user-money UTXOs).
+    ///
+    /// Phase 4 of #191: routes through EnochCrypto's
+    /// `scriptpubkeyP2tr`. The hand-rolled fallback below stays as
+    /// a safety net during the migration window — if the FFI call
+    /// errors (which it shouldn't for a 32-byte input), we still
+    /// produce the same bytes the way Bitcoin Script defines them.
     public static func taprootScriptPubKey(outputKey: Data) throws -> Data {
         guard outputKey.count == 32 else {
             throw ScriptError.wrongOutputKeyLength(outputKey.count)
         }
+        if let viaFFI = try? scriptpubkeyP2tr(outputXonly: outputKey) {
+            return viaFFI
+        }
+        // Fallback hand-rolled path (only reached if FFI throws,
+        // which the length check above already guards against).
         var out = Data(capacity: 34)
         out.append(0x51) // OP_1 (witness version)
         out.append(0x20) // direct-push 32 bytes

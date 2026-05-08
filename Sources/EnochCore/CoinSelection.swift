@@ -1,20 +1,23 @@
 // CoinSelection — pick which UTXOs the wallet should spend to cover
 // a target amount + the operator's flat per-tx fee.
 //
-// The operator charges a flat fee per tx (governance-set, not size-
-// driven), so input count matters less than on Bitcoin L1 — we
-// don't need branch-and-bound or bytes-aware optimization. Greedy
-// largest-first is fine and easy to test.
+// Phase 4 of #191: this Swift module is now a thin wrapper over
+// EnochCrypto's `coinselectSelect` — same algorithm (greedy
+// largest-first with bond filtering and dust-into-fee), single
+// Rust source of truth shared with the operator's Go cgo binding.
+// Public Swift API + error type preserved so existing callers
+// (TxBuilder, SendView) don't change.
 //
-// Bond UTXOs (slashing collateral) are filtered out: a regular
-// "send" must never accidentally consume a bond. Watchtowers can
-// also have bond-like UTXOs by Kind="agent"; same rule.
+// Algorithm choice (unchanged from the pre-migration impl):
+// the operator charges a flat per-tx fee, so input count
+// doesn't materially affect cost — greedy largest-first is
+// fine, no need for branch-and-bound or knapsack.
 //
-// Future: replace the algorithm behind the same select(...) entry
-// point if we ever want randomization for privacy or knapsack-
-// style change minimization. The rest of TxBuilder doesn't care.
+// Bond UTXOs are filtered out. Watchtowers can also have
+// bond-like UTXOs; the same rule applies.
 
 import Foundation
+import EnochCrypto
 
 public enum CoinSelectionError: Swift.Error, Equatable {
     case noSpendableUTXOs
@@ -37,48 +40,102 @@ public enum CoinSelection {
 
     /// Greedy largest-first selection.
     ///
-    /// - Parameter utxos: every UTXO at the wallet's address. Must be
-    ///   the full set; filtering is done internally (bond UTXOs etc.).
+    /// - Parameter utxos: every UTXO at the wallet's address. Must
+    ///   be the full set; bond-UTXO filtering is done by the
+    ///   underlying Rust impl.
     /// - Parameter target: amount to send to the recipient (sats).
     /// - Parameter feePerTx: operator's flat per-tx fee (sats).
-    /// - Parameter dustThreshold: change below this (sats) is rolled
-    ///   into the fee rather than emitted as an output. 546 matches
-    ///   Bitcoin's standardness rule for non-OP_RETURN outputs.
+    /// - Parameter dustThreshold: change below this (sats) is
+    ///   rolled into the fee rather than emitted as an output.
+    ///   546 matches Bitcoin's standardness rule.
     public static func select(
         utxos: [UTXOWire],
         target: UInt64,
         feePerTx: UInt64,
         dustThreshold: UInt64 = 546
     ) throws -> Selection {
-        // Filter spendable: ignore bond UTXOs. A wallet that wants
-        // to actually claim a bond does it through a separate path.
-        let spendable = utxos.filter { $0.bondInfo == nil }
-        if spendable.isEmpty {
-            throw CoinSelectionError.noSpendableUTXOs
+        // Convert UTXOWire → CoinUtxo for the FFI call. Use a
+        // (txHash, vout) → UTXOWire dictionary so we can map the
+        // selected CoinUtxos back to the original wire structs
+        // (preserving scriptPubKey + bondInfo etc. that the FFI
+        // doesn't carry).
+        var byKey: [String: UTXOWire] = [:]
+        var coinUtxos: [CoinUtxo] = []
+        coinUtxos.reserveCapacity(utxos.count)
+        for w in utxos {
+            let key = "\(w.txHash):\(w.vout)"
+            byKey[key] = w
+            // The FFI takes txid as raw bytes; UTXOWire ships hex.
+            // Failed decode means the operator handed us garbage,
+            // which the existing impl would also have failed on
+            // downstream — so swap in placeholder bytes here and
+            // let the algorithmic outcome match (selection is on
+            // amount + bond flag; txid is opaque to it).
+            let txidBytes = Data(hex: w.txHash) ?? Data(count: 32)
+            coinUtxos.append(CoinUtxo(
+                txid: txidBytes,
+                vout: w.vout,
+                amountSat: w.amount,
+                isBond: w.bondInfo != nil
+            ))
         }
 
-        let needed = target + feePerTx
-        // Sort largest first — minimizes input count for typical sends.
-        let sorted = spendable.sorted { $0.amount > $1.amount }
+        let result: EnochCrypto.CoinSelection
+        do {
+            result = try coinselectSelect(
+                utxos: coinUtxos,
+                targetSat: target,
+                feePerTxSat: feePerTx,
+                dustThresholdSat: dustThreshold
+            )
+        } catch let e as CoinSelectError {
+            switch e {
+            case .NoSpendableUtxos:
+                throw CoinSelectionError.noSpendableUTXOs
+            case .InsufficientFunds(let have, let need):
+                throw CoinSelectionError.insufficientFunds(have: have, need: need)
+            }
+        }
 
+        // Map selected CoinUtxos back to the original UTXOWire
+        // entries by (txHash, vout). Preserves scriptPubKey +
+        // bondInfo for the rest of the tx-builder pipeline.
         var picked: [UTXOWire] = []
-        var total: UInt64 = 0
-        for u in sorted {
-            picked.append(u)
-            total = total &+ u.amount
-            if total >= needed { break }
+        picked.reserveCapacity(result.inputs.count)
+        for c in result.inputs {
+            let key = "\(c.txid.hex()):\(c.vout)"
+            if let w = byKey[key] {
+                picked.append(w)
+            }
         }
-        if total < needed {
-            throw CoinSelectionError.insufficientFunds(have: total, need: needed)
+        return Selection(
+            inputs: picked,
+            selectedTotal: result.selectedTotalSat,
+            changeSatoshi: result.changeSat,
+            feeSatoshi: result.feeSat
+        )
+    }
+}
+
+// Hex helpers available locally — Tx.swift may also have them, but
+// keeping a private extension here keeps CoinSelection independent.
+private extension Data {
+    /// Hex-encode (lowercase, no separator).
+    func hex() -> String {
+        map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Decode a hex string. Returns nil for malformed input.
+    init?(hex: String) {
+        let chars = Array(hex)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8("\(chars[i])\(chars[i+1])", radix: 16) else { return nil }
+            out.append(byte)
+            i += 2
         }
-
-        let surplus = total - needed
-        // Sub-dust change → roll into fee. Otherwise emit a change
-        // output and let the operator's accounting balance.
-        let (change, fee) = surplus < dustThreshold
-            ? (UInt64(0), feePerTx + surplus)
-            : (surplus, feePerTx)
-
-        return Selection(inputs: picked, selectedTotal: total, changeSatoshi: change, feeSatoshi: fee)
+        self = out
     }
 }
