@@ -105,9 +105,8 @@ final class TxBuilderTests: XCTestCase {
         )
         let builder = TxBuilder(edge: edge, keystore: keystore)
 
-        // Recipient is itself a Taproot address — the canonical post-
-        // #109 case. (testCanSendToLegacyAddress covers the cross-form
-        // backward-compat path.)
+        // Recipient is itself a Taproot address — post-#109 L2 is
+        // P2TR-only on both ends.
         let recipientOutputKey = Data(repeating: 0xAA, count: 32)
         let recipient = try Address.encodeTaproot(outputKey: recipientOutputKey)
 
@@ -308,31 +307,31 @@ final class TxBuilderTests: XCTestCase {
         XCTAssertTrue(Secp256k1.schnorrVerify(signature: sig, digest: digest, publicKey: me.outputKey))
     }
 
-    /// Cross-form recipient: sending TO a legacy enoch1... address
-    /// must still work during the migration window. The wallet
-    /// emits a P2PKH scriptPubKey for that recipient output even
-    /// though the wallet itself is fully P2TR on the input side.
-    func testCanSendToLegacyAddress() async throws {
+    /// Legacy `enoch1q...` (P2PKH) recipients were valid during the
+    /// #109 migration window. Post-migration L2 is P2TR-only, so the
+    /// wallet now rejects P2PKH recipients with the same shape of
+    /// "unsupported recipient" error as Bitcoin segwit addresses.
+    func testSendToLegacyP2PKHIsRejected() async throws {
         let keystore = InMemoryWalletKeystore()
         _ = try keystore.createKey()
         let me = try walletIdentity(from: keystore)
-
         let edge = makeStubbedEdge(
-            feePerTx: 1_000,
             utxos: [(amount: 100_000, scriptPubKey: me.scriptPubKey)],
             myAddress: me.address
         )
         let builder = TxBuilder(edge: edge, keystore: keystore)
 
         let legacyRecipient = try Address.encodeEnoch(pkh: Data(repeating: 0xCD, count: 20))
-        let tx = try await builder.buildSendTx(recipient: legacyRecipient,
-                                               amountSatoshi: 50_000,
-                                               biometricPrompt: "test")
-
-        XCTAssertEqual(tx.outputs.count, 3)
-        // Recipient output is a P2PKH (25 bytes, prefix 0x76 0xa9 0x14).
-        XCTAssertEqual(tx.outputs[0].scriptPubKey.count, 25)
-        XCTAssertEqual(tx.outputs[0].scriptPubKey.prefix(3), Data([0x76, 0xa9, 0x14]))
+        do {
+            _ = try await builder.buildSendTx(recipient: legacyRecipient,
+                                              amountSatoshi: 50_000,
+                                              biometricPrompt: "test")
+            XCTFail("expected throw")
+        } catch TxBuilderError.unsupportedRecipient {
+            // ok
+        } catch {
+            XCTFail("wrong error: \(error)")
+        }
     }
 
     /// Bitcoin segwit-v0 P2WPKH (`bc1q...`) is a valid Bitcoin

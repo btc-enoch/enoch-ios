@@ -219,10 +219,11 @@ public final class TxBuilder {
         switch decoded {
         case .p2tr(let outputKey):
             return try Script.taprootScriptPubKey(outputKey: outputKey)
-        case .p2pkh(let pkh):
-            // Legacy enoch1... — still valid as a recipient during
-            // the migration window. Both shapes coexist on L2.
-            return try Script.p2pkhScriptPubKey(pkh: pkh)
+        case .p2pkh:
+            // Legacy enoch1q... — L2 has migrated to P2TR. P2PKH
+            // recipients are no longer accepted (script builders
+            // were removed in the rust-bitcoin migration).
+            throw TxBuilderError.unsupportedRecipient("P2PKH (legacy L2) — use a P2TR enoch1p... address")
         case .p2wpkh:
             // Bitcoin segwit v0 P2WPKH (`bc1q.../tb1q...`) — not an
             // L2 address, can't be a recipient on this rail.

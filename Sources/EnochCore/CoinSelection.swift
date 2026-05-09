@@ -71,7 +71,7 @@ public enum CoinSelection {
             // downstream — so swap in placeholder bytes here and
             // let the algorithmic outcome match (selection is on
             // amount + bond flag; txid is opaque to it).
-            let txidBytes = Data(hex: w.txHash) ?? Data(count: 32)
+            let txidBytes = (try? Data(hex: w.txHash)) ?? Data(count: 32)
             coinUtxos.append(CoinUtxo(
                 txid: txidBytes,
                 vout: w.vout,
@@ -103,7 +103,7 @@ public enum CoinSelection {
         var picked: [UTXOWire] = []
         picked.reserveCapacity(result.inputs.count)
         for c in result.inputs {
-            let key = "\(c.txid.hex()):\(c.vout)"
+            let key = "\(c.txid.hexString):\(c.vout)"
             if let w = byKey[key] {
                 picked.append(w)
             }
@@ -117,25 +117,3 @@ public enum CoinSelection {
     }
 }
 
-// Hex helpers available locally — Tx.swift may also have them, but
-// keeping a private extension here keeps CoinSelection independent.
-private extension Data {
-    /// Hex-encode (lowercase, no separator).
-    func hex() -> String {
-        map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Decode a hex string. Returns nil for malformed input.
-    init?(hex: String) {
-        let chars = Array(hex)
-        guard chars.count % 2 == 0 else { return nil }
-        var out = Data(capacity: chars.count / 2)
-        var i = 0
-        while i < chars.count {
-            guard let byte = UInt8("\(chars[i])\(chars[i+1])", radix: 16) else { return nil }
-            out.append(byte)
-            i += 2
-        }
-        self = out
-    }
-}
