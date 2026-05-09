@@ -40,12 +40,19 @@ public struct OperatorInfo: Codable, Equatable {
     public let watchtowerPoolAddress: String
     public let reserveAddress: String
     public let bridgeDepositAddress: String
-    /// Hex-encoded 3-of-5 P2SH multisig redeem script. Used by #108 to
-    /// derive each user's per-user Taproot deposit address client-side
-    /// (P2TR with NUMS internal pubkey + tap-leaf carrying this script
-    /// + a per-user salt). Optional in the wire shape so older
-    /// operators without #108 still decode cleanly.
+    /// Hex-encoded redeem script from the legacy (pre-FROST) bridge.
+    /// Empty under the post-FROST keypath shape; the wallet now
+    /// derives per-user deposit addresses via `frostInternalXOnly`.
+    /// Kept around so wire format stays backwards-decodable.
     public let bridgeRedeemScript: String?
+    /// 32-byte BIP-340 x-only verifying key of the federation's
+    /// FROST PKP, hex-encoded. The wallet pairs this with its own
+    /// x-only L2 key to derive its per-user keypath-shape deposit
+    /// address (FROST stage 7 slice 7b). Optional in the wire shape
+    /// so pre-FROST operators decode cleanly; wallets that need to
+    /// derive a deposit address fail loudly when it's missing rather
+    /// than silently using the wrong (legacy) shape.
+    public let frostInternalXOnly: String?
     public let agentPayoutAddresses: [String]?
     public let withdrawalChallengeWindowL1Blocks: UInt64
     /// L1 confirmation threshold the operator gates mints on. Optional
@@ -74,6 +81,7 @@ public struct OperatorInfo: Codable, Equatable {
         case reserveAddress = "reserve_address"
         case bridgeDepositAddress = "bridge_deposit_address"
         case bridgeRedeemScript = "bridge_redeem_script"
+        case frostInternalXOnly = "frost_internal_xonly"
         case agentPayoutAddresses = "agent_payout_addresses"
         case withdrawalChallengeWindowL1Blocks = "withdrawal_challenge_window_l1_blocks"
         case minDepositConfirmations = "min_deposit_confirmations"

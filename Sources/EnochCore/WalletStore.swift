@@ -188,32 +188,34 @@ public final class WalletStore {
 
     /// The wallet's per-user L1 Bitcoin deposit address (#108) — a
     /// bech32m P2TR derived from the wallet's L2 x-only pubkey + the
-    /// bridge redeem script under the operator's network. nil when
-    /// the wallet isn't loaded yet, when `/v1/info` hasn't been
-    /// fetched, when the operator predates #108 (no
-    /// `bridge_redeem_script`), or when the wallet's L2 address is
-    /// legacy P2PKH (no per-user Taproot deposit address is defined
-    /// for those). Wallets pay the same address every time — it's
-    /// fully deterministic from the L2 identity, not a HD path —
-    /// which keeps the QR + clipboard story simple and makes
-    /// pre-printing the address (e.g. on a paper backup) safe.
+    /// federation's FROST internal x-only verifying key (FROST
+    /// stage 7 slice 7b). nil when the wallet isn't loaded yet, when
+    /// `/v1/info` hasn't been fetched, when the operator hasn't
+    /// emitted `frost_internal_xonly` (legacy pre-FROST shape), or
+    /// when the wallet's L2 address is legacy P2PKH. Wallets pay the
+    /// same address every time — fully deterministic from the L2
+    /// identity, not a HD path — which keeps the QR + clipboard
+    /// story simple and makes pre-printing the address safe.
     public var bridgeDepositAddress: String? {
         guard
             let l2Address = address,
             let info = operatorInfo,
-            let redeem = info.bridgeRedeemScript,
+            let frostInternalHex = info.frostInternalXOnly,
             let reclaimR = info.depositReclaimR,
             let network = DepositAddress.Network(infoNetwork: info.network)
         else { return nil }
         guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
-            // Pre-#109 P2PKH addresses don't have a per-user deposit
-            // address; older wallets fall back to the shared
-            // bridge-deposit address with an OP_RETURN tag.
             return nil
         }
-        return try? DepositAddress.derive(
+        let frostInternal: Data
+        do {
+            frostInternal = try Data(hex: frostInternalHex)
+        } catch {
+            return nil
+        }
+        return try? DepositAddress.deriveKeypath(
             l2XOnly: outputKey,
-            bridgeRedeemScriptHex: redeem,
+            frostInternalXOnly: frostInternal,
             reclaimR: reclaimR,
             network: network
         )
@@ -223,29 +225,30 @@ public final class WalletStore {
     /// deposit address. Same bytes as the bech32m payload of
     /// `bridgeDepositAddress`, exposed separately so SendView can
     /// detect "user is about to send L2 funds to their own deposit
-    /// address" without re-parsing the address string. Mathematically
-    /// the deposit output_key is `NUMS + tweak·G` — no one has the
-    /// privkey for it under the current construction, so an L2 send
-    /// to it produces a permanently-stuck UTXO.
+    /// address" without re-parsing the address string. Under the
+    /// keypath shape, the deposit output_key is
+    /// `FROST_PKP + tap_tweak(reclaim_leaf)·G` — only the federation
+    /// (via FROST keypath) or the user (post-CSV via reclaim leaf)
+    /// can spend it, so an L2 send to it produces a stuck UTXO.
     public var bridgeDepositOutputKey: Data? {
         guard
             let l2Address = address,
             let info = operatorInfo,
-            let redeem = info.bridgeRedeemScript,
+            let frostInternalHex = info.frostInternalXOnly,
             let reclaimR = info.depositReclaimR
         else { return nil }
         guard case .p2tr(let outputKey) = try? Address.decode(l2Address) else {
             return nil
         }
-        let redeemBytes: Data
+        let frostInternal: Data
         do {
-            redeemBytes = try Data(hex: redeem)
+            frostInternal = try Data(hex: frostInternalHex)
         } catch {
             return nil
         }
-        return try? DepositAddress.outputKey(
+        return try? DepositAddress.outputKeyKeypath(
             l2XOnly: outputKey,
-            bridgeRedeemScript: redeemBytes,
+            frostInternalXOnly: frostInternal,
             reclaimR: reclaimR
         )
     }
