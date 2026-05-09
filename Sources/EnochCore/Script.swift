@@ -7,9 +7,12 @@
 //   - opReturnBurn stays Swift-side (mechanical OP_RETURN +
 //     length-prefixed UTF-8 payload, settled spec)
 //
-// Pre-#109 P2PKH builders (p2pkhScriptPubKey / p2pkhScriptSig)
-// were removed in Phase 8 of #191 — fully unused after the
-// L2-wallet P2TR migration landed.
+// p2pkhScriptPubKey is back: federation init still emits P2PKH
+// for protocol-controlled addresses (fee_pool, agent_payouts,
+// operator_payout, reserve), so the wallet must be able to pay
+// into them when constructing fee outputs. User-recipient
+// validation (P2PKH rejected for the recipient field) lives at
+// the TxBuilder layer, not here.
 
 import Foundation
 import EnochCrypto
@@ -17,6 +20,7 @@ import EnochCrypto
 public enum ScriptError: Swift.Error, Equatable {
     case burnPayloadTooLong(Int)
     case wrongOutputKeyLength(Int)
+    case wrongPKHLength(Int)
 }
 
 public enum Script {
@@ -66,5 +70,23 @@ public enum Script {
             throw ScriptError.wrongOutputKeyLength(outputKey.count)
         }
         return try scriptpubkeyP2tr(outputXonly: outputKey)
+    }
+
+    /// P2PKH scriptPubKey:
+    ///
+    ///   OP_DUP OP_HASH160 <push 20> <pkh> OP_EQUALVERIFY OP_CHECKSIG
+    ///   0x76   0xa9       0x14      ...20...  0x88           0xac
+    ///
+    /// Always exactly 25 bytes. Used to pay into protocol-
+    /// controlled addresses (fee_pool, agent_payouts, etc.) which
+    /// the federation init emits as P2PKH. Routes through
+    /// EnochCrypto's scriptpubkeyP2pkh (rust-bitcoin source of
+    /// truth); length validation stays Swift-side so callers see
+    /// `ScriptError.wrongPKHLength`.
+    public static func p2pkhScriptPubKey(pkh: Data) throws -> Data {
+        guard pkh.count == 20 else {
+            throw ScriptError.wrongPKHLength(pkh.count)
+        }
+        return try scriptpubkeyP2pkh(pkh: pkh)
     }
 }
