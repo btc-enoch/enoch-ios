@@ -39,7 +39,12 @@ public struct OperatorInfo: Codable, Equatable {
     public let feePoolAddress: String
     public let watchtowerPoolAddress: String
     public let reserveAddress: String
-    public let bridgeDepositAddress: String
+    /// Optional after the FROST keypath migration: the operator no
+    /// longer emits a single shared bridge address — every user
+    /// derives their own per-user P2TR client-side from
+    /// `frostInternalXOnly`. Kept on the wire shape (decoding only)
+    /// so legacy operators and replayed fixtures still parse.
+    public let bridgeDepositAddress: String?
     /// Hex-encoded redeem script from the legacy (pre-FROST) bridge.
     /// Empty under the post-FROST keypath shape; the wallet now
     /// derives per-user deposit addresses via `frostInternalXOnly`.

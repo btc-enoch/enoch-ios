@@ -483,6 +483,36 @@ public final class WalletStore {
                 // Newest-first for UI display; the operator emits
                 // ascending so we reverse on the wallet side.
                 state.history = h.entries.sorted { $0.height > $1.height }
+
+                // Fallback for the SSE-drop "Crediting…" pill. The
+                // primary clear path is the deposit_minted SSE event
+                // (handled in `case .depositMinted`), but if the SSE
+                // connection drops between deposit_pending and
+                // deposit_minted the pill sticks forever — bootstrap
+                // would clear it but a long-lived session won't.
+                //
+                // Every refresh, claim one pending per matching `mint`
+                // history entry by amountSatoshi. Greedy: a pending
+                // for k sat is cleared when an unclaimed mint entry
+                // with delta_satoshi == k exists. AddressHistoryEntry
+                // doesn't carry the originating L1 txid so this is
+                // amount-based; collisions (multiple in-flight
+                // deposits of the exact same amount) clear in
+                // arbitrary order — UX is identical.
+                if !state.pendingDeposits.isEmpty {
+                    var available: [UInt64] = []
+                    available.reserveCapacity(state.history.count)
+                    for entry in state.history where entry.role == .mint && entry.deltaSatoshi > 0 {
+                        available.append(UInt64(entry.deltaSatoshi))
+                    }
+                    for key in Array(state.pendingDeposits.keys) {
+                        guard let pending = state.pendingDeposits[key] else { continue }
+                        if let idx = available.firstIndex(of: pending.amountSatoshi) {
+                            available.remove(at: idx)
+                            state.pendingDeposits.removeValue(forKey: key)
+                        }
+                    }
+                }
             }
             if case .success(let p) = pending {
                 // Anything in /pending_withdrawals is still awaiting
