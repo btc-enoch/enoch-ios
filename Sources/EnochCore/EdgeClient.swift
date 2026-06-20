@@ -41,22 +41,36 @@ public enum EdgeError: Swift.Error, Equatable {
 
 public final class EdgeClient {
     public let baseURL: URL
+    public let substrate: NetworkSubstrate
     // `session` is `internal` (not `private`) so the SSE extension
     // in EdgeEvents.swift can drive it. Module-private boundary is
-    // preserved either way.
+    // preserved either way. Derived from `substrate.urlSession` at
+    // init time so EdgeClient holds a stable reference even if the
+    // substrate's internal session changes.
     internal let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
     /// `baseURL` is the wallet-facing edge endpoint, e.g.
     /// `http://localhost:8081` in the simulator or
-    /// `https://edge.enoch.example` in production. `session` defaults
-    /// to `.shared`; tests inject a mocked session.
-    public init(baseURL: URL, session: URLSession = .shared) {
+    /// `https://edge.enoch.example` in production. `substrate`
+    /// supplies the URLSession used for every request — the
+    /// privacy property (plain HTTP vs Tor-routed) lives in the
+    /// substrate. Defaults to PlainHTTPSubstrate (no privacy).
+    public init(baseURL: URL, substrate: NetworkSubstrate = PlainHTTPSubstrate()) {
         self.baseURL = baseURL
-        self.session = session
+        self.substrate = substrate
+        self.session = substrate.urlSession
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
+    }
+
+    /// Legacy convenience initializer kept so existing call sites
+    /// that pass a URLSession directly continue to compile. New
+    /// callers should construct a NetworkSubstrate explicitly so
+    /// the privacy substrate is visible at the wiring layer.
+    public convenience init(baseURL: URL, session: URLSession) {
+        self.init(baseURL: baseURL, substrate: PlainHTTPSubstrate(session: session))
     }
 
     // MARK: - GET endpoints

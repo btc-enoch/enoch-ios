@@ -1,0 +1,81 @@
+import XCTest
+@testable import EnochCore
+
+final class NetworkSubstrateTests: XCTestCase {
+
+    /// PlainHTTPSubstrate with no arguments returns URLSession.shared.
+    /// EdgeClient's default-substrate path depends on this — the
+    /// no-args wallet bring-up keeps using the shared session.
+    func testPlainHTTPDefaultsToSharedSession() {
+        let sub = PlainHTTPSubstrate()
+        XCTAssertTrue(sub.urlSession === URLSession.shared)
+        XCTAssertEqual(sub.description, "plainhttp")
+    }
+
+    /// PlainHTTPSubstrate honors an injected URLSession verbatim.
+    /// Used by test code (MockURLProtocol) to swap in a mocked
+    /// transport without going through a real network call.
+    func testPlainHTTPHonorsInjectedSession() {
+        let config = URLSessionConfiguration.ephemeral
+        let custom = URLSession(configuration: config)
+        let sub = PlainHTTPSubstrate(session: custom)
+        XCTAssertTrue(sub.urlSession === custom)
+    }
+
+    /// PlainHTTPSubstrate.close() is safe on the shared session
+    /// (which can't be invalidated). The substrate must not crash;
+    /// the shared session must remain usable for other code.
+    func testPlainHTTPCloseSafeOnSharedSession() {
+        let sub = PlainHTTPSubstrate()
+        sub.close()
+        sub.close() // idempotent
+        // URLSession.shared still usable after substrate close.
+        XCTAssertNotNil(URLSession.shared.configuration)
+    }
+
+    /// TorSubstrate is intentionally not yet implemented. Construction
+    /// must throw SubstrateError.notImplemented so a wallet
+    /// misconfigured to use Tor fails loudly at boot rather than
+    /// silently using PlainHTTP. The error message must mention the
+    /// follow-up slice (#83-S6b) so the failure is actionable.
+    func testTorSubstrateThrowsNotImplemented() {
+        do {
+            _ = try TorSubstrate(socksHost: "127.0.0.1", socksPort: 9050)
+            XCTFail("expected SubstrateError.notImplemented")
+        } catch let err as SubstrateError {
+            guard case .notImplemented(let message) = err else {
+                XCTFail("expected .notImplemented, got \(err)")
+                return
+            }
+            XCTAssertTrue(message.contains("#83-S6b"))
+            XCTAssertTrue(message.contains("9050"))
+        } catch {
+            XCTFail("expected SubstrateError, got \(error)")
+        }
+    }
+
+    /// EdgeClient(baseURL:substrate:) wires the substrate's
+    /// urlSession through to its internal session reference. Sanity
+    /// check that the new init path doesn't accidentally use a
+    /// different session.
+    func testEdgeClientUsesSubstrateSession() {
+        let config = URLSessionConfiguration.ephemeral
+        let custom = URLSession(configuration: config)
+        let sub = PlainHTTPSubstrate(session: custom)
+        let client = EdgeClient(baseURL: URL(string: "http://test.local")!, substrate: sub)
+        XCTAssertTrue(client.session === custom)
+        XCTAssertTrue(client.substrate === sub)
+    }
+
+    /// Legacy convenience initializer EdgeClient(baseURL:session:)
+    /// still works — wraps the URLSession in PlainHTTPSubstrate.
+    /// Existing test fixtures that pass a session directly continue
+    /// to compile and behave identically.
+    func testEdgeClientLegacyInitWrapsInPlainHTTP() {
+        let config = URLSessionConfiguration.ephemeral
+        let custom = URLSession(configuration: config)
+        let client = EdgeClient(baseURL: URL(string: "http://test.local")!, session: custom)
+        XCTAssertTrue(client.session === custom)
+        XCTAssertEqual(client.substrate.description, "plainhttp")
+    }
+}
