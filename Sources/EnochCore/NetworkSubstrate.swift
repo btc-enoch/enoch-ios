@@ -57,14 +57,51 @@ public protocol NetworkSubstrate: AnyObject {
 /// property. Fine for regtest and for trusted-network deployments;
 /// the production wallet on mainnet should default to a TorSubstrate
 /// once that ships (#83-S6b).
+///
+/// Mainnet refusal: if you try to construct PlainHTTPSubstrate with
+/// network: "mainnet" without allowOnMainnet: true, init throws
+/// SubstrateError.plainHTTPRefusedOnMainnet. This mirrors the Go-side
+/// safety gate in federation/substrate/plainhttp/plainhttp.go — a
+/// wallet shipped to a real user with mainnet config defaulting to
+/// PlainHTTP would silently leak the user's IP to every operator on
+/// every payment, and that's worth failing loudly at boot to prevent.
 public final class PlainHTTPSubstrate: NetworkSubstrate {
     public let urlSession: URLSession
-    public let description: String = "plainhttp"
+    public let description: String
 
-    /// `session` defaults to `.shared`. Tests inject a mocked
-    /// URLSession backed by a custom URLProtocol.
+    /// Non-throwing convenience initializer for the dev / regtest /
+    /// no-network-context path. `session` defaults to `.shared`; tests
+    /// inject a mocked URLSession backed by a custom URLProtocol.
+    ///
+    /// Use the throwing `init(session:network:allowOnMainnet:)` when
+    /// the caller knows what Bitcoin network it's running against —
+    /// that's the path where mainnet refusal applies.
     public init(session: URLSession = .shared) {
         self.urlSession = session
+        self.description = "plainhttp"
+    }
+
+    /// Throwing, network-aware initializer.
+    ///
+    /// `network` names the Bitcoin network — "regtest" / "signet" /
+    /// "testnet" / "mainnet". If "mainnet" and `allowOnMainnet` is
+    /// false (default), init throws `.plainHTTPRefusedOnMainnet`.
+    ///
+    /// `allowOnMainnet: true` opts the caller into PlainHTTP on
+    /// mainnet. Required for: self-hosted edge inside a trusted
+    /// network (corporate VPN), system-Tor deployments where privacy
+    /// comes from below the substrate. Honest callers opt in with
+    /// one parameter; misconfigured wallets fail loudly.
+    public init(
+        session: URLSession = .shared,
+        network: String,
+        allowOnMainnet: Bool = false
+    ) throws {
+        if network == "mainnet" && !allowOnMainnet {
+            throw SubstrateError.plainHTTPRefusedOnMainnet
+        }
+        self.urlSession = session
+        self.description = network.isEmpty ? "plainhttp" : "plainhttp:\(network)"
     }
 
     public func close() {
@@ -87,6 +124,11 @@ public enum SubstrateError: Swift.Error, Equatable {
 
     /// Substrate was used after close().
     case closed
+
+    /// PlainHTTPSubstrate construction refused because the configured
+    /// network is "mainnet" and allowOnMainnet was not set. Mirrors
+    /// the Go-side ErrPlainHTTPRefusedOnMainnet sentinel.
+    case plainHTTPRefusedOnMainnet
 }
 
 /// Tor substrate stub. iOS Tor integration is deferred to a

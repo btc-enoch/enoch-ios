@@ -33,6 +33,43 @@ final class NetworkSubstrateTests: XCTestCase {
         XCTAssertNotNil(URLSession.shared.configuration)
     }
 
+    /// #83-S7 mainnet refusal: throwing init with network:"mainnet"
+    /// and no opt-in must throw .plainHTTPRefusedOnMainnet. Mirrors
+    /// the Go-side ErrPlainHTTPRefusedOnMainnet sentinel — a wallet
+    /// shipping with mainnet defaults must NOT silently use PlainHTTP
+    /// and leak client IPs to operators.
+    func testPlainHTTPRefusesMainnetWithoutOptIn() {
+        do {
+            _ = try PlainHTTPSubstrate(network: "mainnet")
+            XCTFail("expected SubstrateError.plainHTTPRefusedOnMainnet")
+        } catch SubstrateError.plainHTTPRefusedOnMainnet {
+            // expected
+        } catch {
+            XCTFail("expected .plainHTTPRefusedOnMainnet, got \(error)")
+        }
+    }
+
+    /// Honest mainnet+plainhttp deployments (self-hosted edge inside
+    /// a trusted network, system-Tor where privacy comes from below
+    /// the substrate) opt in with allowOnMainnet: true. Init must
+    /// succeed and the description must encode the network for log
+    /// inspection.
+    func testPlainHTTPAllowsMainnetWithOptIn() throws {
+        let sub = try PlainHTTPSubstrate(network: "mainnet", allowOnMainnet: true)
+        XCTAssertEqual(sub.description, "plainhttp:mainnet")
+        sub.close()
+    }
+
+    /// Mainnet refusal is mainnet-specific: regtest, signet, testnet
+    /// all pass without opt-in.
+    func testPlainHTTPAllowsNonMainnetWithoutOptIn() throws {
+        for network in ["regtest", "signet", "testnet"] {
+            let sub = try PlainHTTPSubstrate(network: network)
+            XCTAssertEqual(sub.description, "plainhttp:\(network)")
+            sub.close()
+        }
+    }
+
     /// TorSubstrate is intentionally not yet implemented. Construction
     /// must throw SubstrateError.notImplemented so a wallet
     /// misconfigured to use Tor fails loudly at boot rather than
