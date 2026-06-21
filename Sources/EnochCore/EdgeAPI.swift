@@ -1,13 +1,16 @@
-// EdgeAPI — typed wire shapes for enoch-edge /v1/* responses.
+// EdgeAPI — typed wire shapes for the operator's /v1/* responses.
 //
-// These mirror the JSON the edge emits (which in turn mirrors what
-// the operator emits, with edge-side wrappers on /v1/info). Field
-// names use snake_case via CodingKeys so the wire stays canonical
-// while Swift call sites get camelCase ergonomics.
+// File name is a vestige of when the iOS wallet went through an
+// enoch-edge HTTP proxy (deleted 2026-06-21); the types still exist
+// because FederationDirectClient consumes the same JSON shapes,
+// just by talking to each operator directly.
+//
+// Field names use snake_case via CodingKeys so the wire stays
+// canonical while Swift call sites get camelCase ergonomics.
 //
 // Hex-encoded byte fields are kept as `String` here. Conversion to
-// `Data` happens at the EdgeClient boundary so accidental string
-// vs. data confusion at the call site can't happen.
+// `Data` happens at the FederationDirectClient boundary so accidental
+// string vs. data confusion at the call site can't happen.
 
 import Foundation
 
@@ -199,36 +202,6 @@ public enum HistoryRole: String, Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = HistoryRole(rawValue: raw) ?? .unknown
-    }
-}
-
-// MARK: - /v1/fee_oracle
-
-public struct FeeOracleResponse: Codable, Equatable {
-    public let source: String
-    public let asOf: String  // RFC3339; not parsed here — UI surface
-    public let ratesSatPerVB: FeeRates
-
-    enum CodingKeys: String, CodingKey {
-        case source
-        case asOf = "as_of"
-        case ratesSatPerVB = "rates_sat_per_vb"
-    }
-}
-
-public struct FeeRates: Codable, Equatable {
-    public let fastest: UInt64
-    public let halfHour: UInt64
-    public let hour: UInt64
-    public let economy: UInt64
-    public let minimum: UInt64
-
-    enum CodingKeys: String, CodingKey {
-        case fastest
-        case halfHour = "half_hour"
-        case hour
-        case economy
-        case minimum
     }
 }
 

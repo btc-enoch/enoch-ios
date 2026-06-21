@@ -57,11 +57,6 @@ public final class WalletStore {
     /// wallet's state.
     public private(set) var states: [String: WalletLiveState] = [:]
 
-    /// Network-shared snapshot of the operator's fee oracle. Not
-    /// per-wallet because every wallet on this operator pays the same
-    /// rate.
-    public private(set) var feeRates: FeeRates?
-
     /// Network-shared operator metadata (network, fee schedule,
     /// bridge redeem script, min_deposit_confirmations, …).
     public private(set) var operatorInfo: OperatorInfo?
@@ -285,7 +280,7 @@ public final class WalletStore {
     // construction: no actor holds `self` until init returns, and
     // the values are never mutated thereafter.
     @ObservationIgnored private nonisolated(unsafe) let keystore: WalletKeystore
-    @ObservationIgnored private nonisolated(unsafe) let client: EdgeClient
+    @ObservationIgnored private nonisolated(unsafe) let client: any L2Client
 
     @ObservationIgnored private var eventTask: Task<Void, Never>?
 
@@ -294,7 +289,7 @@ public final class WalletStore {
     /// stub WalletStore. Storage for the dependency `let`s is
     /// opted out of @MainActor via `nonisolated(unsafe)` so the
     /// assignments here are accepted by Swift 6.
-    public nonisolated init(keystore: WalletKeystore, client: EdgeClient) {
+    public nonisolated init(keystore: WalletKeystore, client: any L2Client) {
         self.keystore = keystore
         self.client = client
     }
@@ -454,23 +449,23 @@ public final class WalletStore {
 
     // MARK: - Refresh
 
-    /// Re-pull balance, address history, fee rates, and operator
-    /// info concurrently. Each network call is independent —
-    /// partial failure (e.g. fee oracle 502) doesn't take the rest
-    /// down. Errors land on `lastError` so the UI can surface a
-    /// banner without panicking the user.
+    /// Re-pull balance, address history, operator info, and pending
+    /// withdrawals concurrently. Each network call is independent —
+    /// partial failure (e.g. one operator down on a cross-check)
+    /// doesn't take the rest down. Errors land on `lastError` so the
+    /// UI can surface a banner without panicking the user.
     public func refresh() async {
         guard let address else { return }
 
         async let balResult = result { try await self.client.getBalance(address: address) }
-        async let histResult = result { try await self.client.getAddressHistory(address: address) }
-        async let feeResult = result { try await self.client.getFeeOracle() }
+        async let histResult = result {
+            try await self.client.getAddressHistory(address: address, from: nil, limit: nil)
+        }
         async let infoResult = result { try await self.client.getInfo() }
         async let pendingResult = result { try await self.client.getPendingWithdrawals() }
 
         let bal = await balResult
         let hist = await histResult
-        let fee = await feeResult
         let info = await infoResult
         let pending = await pendingResult
 
@@ -526,11 +521,8 @@ public final class WalletStore {
                 }
             }
         }
-        if case .success(let f) = fee {
-            self.feeRates = f.ratesSatPerVB
-        }
         if case .success(let i) = info {
-            self.operatorInfo = i.operator
+            self.operatorInfo = i
         }
 
         // Surface the last failed call (if any) for the UI banner.
@@ -540,7 +532,6 @@ public final class WalletStore {
         if case .failure(let e) = bal  { lastError = e.localizedDescription }
         if case .failure(let e) = hist { lastError = e.localizedDescription }
         if case .failure(let e) = info { lastError = e.localizedDescription }
-        if case .failure(let e) = fee  { lastError = e.localizedDescription }
     }
 
     // MARK: - SSE event loop

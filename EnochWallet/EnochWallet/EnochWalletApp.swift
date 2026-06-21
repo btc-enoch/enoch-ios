@@ -22,11 +22,15 @@ struct EnochWalletApp: App {
     /// state automatically.
     @State private var wallet = WalletStore(
         keystore: KeychainWalletKeystore(),
-        // Localhost edge — works in the iOS Simulator (ATS allows
-        // plaintext to localhost). When testing on a physical
-        // iPhone, swap this for the LAN/HTTPS URL once Caddy is
-        // wired up (Phase 6).
-        client: EdgeClient(baseURL: URL(string: "http://localhost:8081")!)
+        // Federation-direct client over the bundled regtest manifest
+        // (spec §4.9). The mainnet wallet replaces this with a
+        // signed-binary-pinned manifest at install time.
+        client: FederationDirectL2Client(
+            try! FederationDirectClient(
+                manifest: .bundledRegtest(),
+                substrate: PlainHTTPSubstrate()
+            )
+        )
     )
 
     var body: some Scene {

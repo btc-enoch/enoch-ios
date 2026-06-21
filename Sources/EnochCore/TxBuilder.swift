@@ -43,10 +43,10 @@ public enum TxBuilderError: Swift.Error {
 }
 
 public final class TxBuilder {
-    private let edge: EdgeClient
+    private let edge: any L2Client
     private let keystore: WalletKeystore
 
-    public init(edge: EdgeClient, keystore: WalletKeystore) {
+    public init(edge: any L2Client, keystore: WalletKeystore) {
         self.edge = edge
         self.keystore = keystore
     }
@@ -124,7 +124,7 @@ public final class TxBuilder {
         let info = try await infoTask
         let utxos = try await utxosTask
 
-        guard let feePerTx = info.operator.feeSchedule?.perTxFeeSatoshi else {
+        guard let feePerTx = info.feeSchedule?.perTxFeeSatoshi else {
             throw TxBuilderError.missingFeeSchedule
         }
 
@@ -132,7 +132,7 @@ public final class TxBuilder {
         // post-#109 + B6 it's uniformly P2TR.
         let feePoolScript: Data
         do {
-            feePoolScript = try Self.scriptForRecipient(info.operator.feePoolAddress)
+            feePoolScript = try Self.scriptForRecipient(info.feePoolAddress)
         } catch {
             throw TxBuilderError.decodeFeePool(error)
         }

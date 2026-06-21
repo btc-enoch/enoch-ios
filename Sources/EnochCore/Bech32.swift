@@ -5,8 +5,8 @@
 // pre-Taproot legacy `enoch1...` addresses; BIP350 governs witness
 // version 1+ (Taproot) + Enoch's post-#109 `enoch1p...` addresses.
 //
-// Mirrors enoch-edge/internal/address (Go) so a single set of test
-// vectors covers both implementations.
+// Mirrors the operator's Go bech32 impl (btcsuite/btcutil/bech32)
+// so a single set of test vectors covers both implementations.
 //   BIP173: https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
 //   BIP350: https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
 

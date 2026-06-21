@@ -184,7 +184,7 @@ struct WithdrawView: View {
             dismiss()
         } catch let e as TxBuilderError {
             self.error = render(e)
-        } catch let e as EdgeError {
+        } catch let e as L2ClientError {
             self.error = render(e)
         } catch {
             self.error = error.localizedDescription
@@ -208,7 +208,7 @@ struct WithdrawView: View {
         }
     }
 
-    private func render(_ e: EdgeError) -> String {
+    private func render(_ e: L2ClientError) -> String {
         switch e {
         case .http(let status, let body):
             return body.isEmpty ? "Server returned \(status)." : body

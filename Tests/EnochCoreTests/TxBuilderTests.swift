@@ -35,57 +35,27 @@ final class TxBuilderTests: XCTestCase {
         feePoolOutputKey: Data = Data(repeating: 0x11, count: 32),
         utxos: [(amount: UInt64, scriptPubKey: Data)],
         myAddress: String
-    ) -> EdgeClient {
+    ) -> StubL2Client {
         // The fee pool address is now P2TR — same shape as the
         // wallet's own. (Pre-#109 it was P2PKH; post-cutover both
         // sides are uniformly Taproot.)
         let feePoolAddr = (try? Address.encodeTaproot(outputKey: feePoolOutputKey)) ?? "enoch1p"
-
-        MockURLProtocol.handler = { req in
-            let path = req.url?.path ?? ""
-            if path == "/v1/info" {
-                let body = """
-                {
-                  "edge": { "version": "test", "protocol_version": 1 },
-                  "operator": {
-                    "version": "test", "protocol_version": 1, "network": "regtest",
-                    "operator_pubkey": "00", "operator_payout_address": "\(feePoolAddr)",
-                    "fee_pool_address": "\(feePoolAddr)",
-                    "watchtower_pool_address": "\(feePoolAddr)",
-                    "reserve_address": "\(feePoolAddr)", "bridge_deposit_address": "2N",
-                    "withdrawal_challenge_window_l1_blocks": 100, "current_height": 1,
-                    "fee_schedule": { "per_tx_fee": \(feePerTx) }
-                  }
-                }
-                """
-                return (200, Data(body.utf8))
-            }
-            if path == "/v1/utxos/\(myAddress)" {
-                let entries = utxos.enumerated().map { (i, u) in
-                    let txHash = String(format: "%064x", i + 1)
-                    return """
-                    {
-                      "tx_hash": "\(txHash)",
-                      "vout": 0,
-                      "amount": \(u.amount),
-                      "script_pubkey": "\(u.scriptPubKey.hexString)"
-                    }
-                    """
-                }.joined(separator: ",")
-                let body = #"{"address":"\#(myAddress)","utxos":[\#(entries)]}"#
-                return (200, Data(body.utf8))
-            }
-            return (404, Data())
+        let utxoWires = utxos.enumerated().map { (i, u) -> UTXOWire in
+            let txHashHex = String(format: "%064x", i + 1)
+            return UTXOWire(
+                txHash: txHashHex,
+                vout: 0,
+                amount: u.amount,
+                scriptPubKey: u.scriptPubKey.hexString,
+                bondInfo: nil
+            )
         }
-
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        return EdgeClient(baseURL: edgeURL, session: URLSession(configuration: config))
-    }
-
-    override func tearDown() {
-        super.tearDown()
-        MockURLProtocol.handler = nil
+        return StubL2Client(
+            feePerTx: feePerTx,
+            feePoolAddress: feePoolAddr,
+            myAddress: myAddress,
+            utxos: utxoWires
+        )
     }
 
     /// Happy path: 1 input fully covers target + fee + change. The
@@ -359,5 +329,71 @@ final class TxBuilderTests: XCTestCase {
         } catch {
             XCTFail("wrong error: \(error)")
         }
+    }
+}
+
+/// In-package L2Client stub for TxBuilder tests. TxBuilder only
+/// touches `getInfo` (for fee + feePool address) and `getUTXOs` (for
+/// coin selection); everything else fatalErrors so a future TxBuilder
+/// change that reaches outside this surface fails the test loudly
+/// rather than returning a silent empty value.
+final class StubL2Client: L2Client {
+    let feePerTx: UInt64
+    let feePoolAddress: String
+    let myAddress: String
+    let utxos: [UTXOWire]
+
+    init(
+        feePerTx: UInt64,
+        feePoolAddress: String,
+        myAddress: String,
+        utxos: [UTXOWire]
+    ) {
+        self.feePerTx = feePerTx
+        self.feePoolAddress = feePoolAddress
+        self.myAddress = myAddress
+        self.utxos = utxos
+    }
+
+    func getInfo() async throws -> OperatorInfo {
+        // Synthesize the minimum OperatorInfo TxBuilder reads.
+        let json = """
+        {
+          "version": "test",
+          "protocol_version": 1,
+          "network": "regtest",
+          "operator_pubkey": "00",
+          "operator_payout_address": "\(feePoolAddress)",
+          "fee_pool_address": "\(feePoolAddress)",
+          "watchtower_pool_address": "\(feePoolAddress)",
+          "reserve_address": "\(feePoolAddress)",
+          "bridge_deposit_address": "2N",
+          "withdrawal_challenge_window_l1_blocks": 100,
+          "current_height": 1,
+          "fee_schedule": { "per_tx_fee": \(feePerTx) }
+        }
+        """
+        return try JSONDecoder().decode(OperatorInfo.self, from: Data(json.utf8))
+    }
+
+    func getUTXOs(address: String) async throws -> UTXOsResponse {
+        XCTAssertEqual(address, myAddress, "TxBuilder queried unexpected address")
+        return UTXOsResponse(address: address, utxos: utxos)
+    }
+
+    func getBalance(address: String) async throws -> BalanceResponse {
+        fatalError("StubL2Client.getBalance unused by TxBuilder")
+    }
+    func getAddressHistory(address: String, from: UInt64?, limit: UInt64?) async throws -> AddressHistoryResponse {
+        fatalError("StubL2Client.getAddressHistory unused by TxBuilder")
+    }
+    func getPendingWithdrawals() async throws -> PendingWithdrawalsResponse {
+        fatalError("StubL2Client.getPendingWithdrawals unused by TxBuilder")
+    }
+    func submitTx(_ tx: Tx) async throws -> SubmitTxResponse {
+        fatalError("StubL2Client.submitTx unused by TxBuilder")
+    }
+    func eventStream(filter: [String]) -> AsyncThrowingStream<EdgeEvent, Swift.Error> {
+        fatalError("StubL2Client.eventStream unused by TxBuilder")
     }
 }

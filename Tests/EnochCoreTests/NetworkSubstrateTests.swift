@@ -91,28 +91,4 @@ final class NetworkSubstrateTests: XCTestCase {
         }
     }
 
-    /// EdgeClient(baseURL:substrate:) wires the substrate's
-    /// urlSession through to its internal session reference. Sanity
-    /// check that the new init path doesn't accidentally use a
-    /// different session.
-    func testEdgeClientUsesSubstrateSession() {
-        let config = URLSessionConfiguration.ephemeral
-        let custom = URLSession(configuration: config)
-        let sub = PlainHTTPSubstrate(session: custom)
-        let client = EdgeClient(baseURL: URL(string: "http://test.local")!, substrate: sub)
-        XCTAssertTrue(client.session === custom)
-        XCTAssertTrue(client.substrate === sub)
-    }
-
-    /// Legacy convenience initializer EdgeClient(baseURL:session:)
-    /// still works — wraps the URLSession in PlainHTTPSubstrate.
-    /// Existing test fixtures that pass a session directly continue
-    /// to compile and behave identically.
-    func testEdgeClientLegacyInitWrapsInPlainHTTP() {
-        let config = URLSessionConfiguration.ephemeral
-        let custom = URLSession(configuration: config)
-        let client = EdgeClient(baseURL: URL(string: "http://test.local")!, session: custom)
-        XCTAssertTrue(client.session === custom)
-        XCTAssertEqual(client.substrate.description, "plainhttp")
-    }
 }

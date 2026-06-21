@@ -10,7 +10,7 @@
 //
 // The legacy path reduces to a 20-byte HASH160(pubkey). The Taproot
 // path reduces to a 32-byte x-only output key (BIP-340/341).
-// Mirrors enoch-edge/internal/address (Go).
+// Mirrors the operator's Go address impl.
 
 import Foundation
 

@@ -2,8 +2,10 @@
 
 Native iOS wallet for [Enoch](../enoch) — Bitcoin's current account.
 Non-custodial: keys live in the iOS Secure Enclave / Keychain, gated
-by Face ID. Talks to the [`enoch-edge`](../enoch-edge) `/v1/*` API
-for read state, transaction submit, and the SSE event stream.
+by Face ID. Talks directly to each federation operator's `/v1/*` API
+(K-of-N cross-check on reads, manifest-order retry on submit_tx,
+deduped SSE event stream across operators) — see
+[`spec/ios_active_spv.md`](../enoch/spec/ios_active_spv.md) §4.9.
 
 ## Layout
 
@@ -11,7 +13,7 @@ for read state, transaction submit, and the SSE event stream.
 enoch-ios/
 ├── Package.swift              # SPM manifest — declares EnochCore
 ├── Sources/EnochCore/         # protocol primitives (bech32, secp256k1,
-│                              # tx serialization, sighash, edge client)
+│                              # tx serialization, sighash, federation-direct client)
 ├── Tests/EnochCoreTests/      # `swift test` — runs without Xcode
 └── EnochWallet.xcodeproj/     # iOS app target — added when UI work begins
 ```

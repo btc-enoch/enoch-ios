@@ -8,8 +8,9 @@
 // imports EnochCore as a local package dependency.
 //
 // All wire-format work (bech32, secp256k1 sigs, tx serialization,
-// sighash) lives here. Operator-facing HTTP/SSE clients live here
-// too, against the enoch-edge `/v1/*` API.
+// sighash) lives here. The federation-direct HTTP/SSE client lives
+// here too — it fans out to each operator's onion `/v1/*` with
+// K-of-N cross-check.
 import PackageDescription
 
 let package = Package(

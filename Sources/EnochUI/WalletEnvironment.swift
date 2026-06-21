@@ -16,6 +16,14 @@ public extension EnvironmentValues {
     /// which the legacy pattern complained about.
     @Entry var wallet: WalletStore = WalletStore(
         keystore: InMemoryWalletKeystore(),
-        client: EdgeClient(baseURL: URL(string: "http://localhost:8081")!)
+        // Federation-direct client over the bundled regtest manifest
+        // (spec §4.9). The mainnet wallet replaces this with a
+        // signed-binary-pinned manifest at install time.
+        client: FederationDirectL2Client(
+            try! FederationDirectClient(
+                manifest: .bundledRegtest(),
+                substrate: PlainHTTPSubstrate()
+            )
+        )
     )
 }

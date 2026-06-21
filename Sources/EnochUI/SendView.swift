@@ -9,7 +9,7 @@
 // rather than only erroring out on submit. Failure paths get
 // rendered as red footer text — operator rejections, network
 // errors, biometric cancellation are all distinguishable from the
-// underlying EdgeError / TxBuilderError types.
+// underlying L2ClientError / TxBuilderError types.
 
 import SwiftUI
 import EnochCore
@@ -176,7 +176,7 @@ struct SendView: View {
             dismiss()
         } catch let e as TxBuilderError {
             self.error = render(e)
-        } catch let e as EdgeError {
+        } catch let e as L2ClientError {
             self.error = render(e)
         } catch {
             self.error = error.localizedDescription
@@ -200,7 +200,7 @@ struct SendView: View {
         }
     }
 
-    private func render(_ e: EdgeError) -> String {
+    private func render(_ e: L2ClientError) -> String {
         switch e {
         case .http(let status, let body):
             // The operator's reject reasons (e.g. "insufficient

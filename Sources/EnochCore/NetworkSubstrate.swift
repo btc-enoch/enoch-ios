@@ -1,19 +1,21 @@
 // NetworkSubstrate — Swift mirror of the Go federation/substrate
 // abstraction in the enoch repo. The wallet's outbound HTTP traffic
-// to enoch-edge rides on a substrate-provided URLSession; swapping
-// the substrate at boot swaps the privacy property (direct HTTP →
-// Tor SOCKS → eventually Sphinx) without changing any wallet code.
+// to each operator's onion rides on a substrate-provided URLSession;
+// swapping the substrate at boot swaps the privacy property (direct
+// HTTP → Tor SOCKS → eventually Sphinx) without changing any wallet
+// code.
 //
 // Why a "provider" shape rather than a 1:1 binding of the Go
 // NetworkSubstrate interface (SubmitTx/Subscribe/Query):
 //
-// EdgeClient has HTTP-application logic — status-code-based error
-// surfacing (`.http(statusCode: 422, body: "insufficient funds")`),
-// JSON envelope decoding, SSE framing — that doesn't fit cleanly
-// above an abstract submitTx/query interface. Same impedance
-// mismatch as enoch-edge: we keep the application logic in
-// EdgeClient and let the substrate provide the *transport* (the
-// URLSession). The privacy property lives in the transport.
+// FederationDirectClient has HTTP-application logic — status-code-
+// based error surfacing (`.http(statusCode: 422, body: "insufficient
+// funds")`), JSON envelope decoding, SSE framing — that doesn't fit
+// cleanly above an abstract submitTx/query interface. Same impedance
+// mismatch as the Go side: we keep the application logic in
+// FederationDirectClient and let the substrate provide the
+// *transport* (the URLSession). The privacy property lives in the
+// transport.
 //
 // When Sphinx ships, this protocol needs a different shape — a
 // Sphinx substrate can't return a URLSession because there's no

@@ -7,7 +7,10 @@
 //   - Secp256k1     wraps swift-secp256k1 with the operator's sighash + low-s rules
 //   - Tx            wire types matching submitTxRequestJSON on the operator side
 //   - Sighash       double-SHA256 over the canonical-form tx (scriptSigs zeroed)
-//   - EdgeClient    typed HTTP/SSE client against enoch-edge /v1/*
+//   - FederationDirectClient
+//                   K-of-N HTTP/SSE client that fans out to each
+//                   operator's /v1/* directly (replaced the old
+//                   EdgeClient when enoch-edge was retired)
 //
 // Nothing here imports UIKit or SwiftUI. The iOS app target depends
 // on EnochCore but EnochCore stays platform-agnostic so it builds

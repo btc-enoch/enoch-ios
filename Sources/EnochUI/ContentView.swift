@@ -36,7 +36,12 @@ public struct ContentView: View {
 #Preview("With wallet (home)") {
     let store = WalletStore(
         keystore: InMemoryWalletKeystore(),
-        client: EdgeClient(baseURL: URL(string: "http://localhost:8081")!)
+        client: FederationDirectL2Client(
+            try! FederationDirectClient(
+                manifest: .bundledRegtest(),
+                substrate: PlainHTTPSubstrate()
+            )
+        )
     )
     return ContentView()
         .environment(\.wallet, store)
