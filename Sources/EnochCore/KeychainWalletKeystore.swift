@@ -82,14 +82,19 @@ public final class KeychainWalletKeystore: WalletKeystore {
 
     public func activeWalletID() -> String? {
         let raw = UserDefaults.standard.string(forKey: activeKeyDefault)
-        // Defensive: validate the stored id is still in the keychain;
-        // a deleted-from-elsewhere wallet could leave a stale pointer.
-        guard let id = raw else { return nil }
         let descriptors = (try? listWallets()) ?? []
-        if descriptors.contains(where: { $0.id == id }) {
+        // Two paths that both end at "pick the most recent wallet":
+        //   1. No active pointer ever stored (fresh install of an app
+        //      whose Keychain entries survived from before — happens on
+        //      the iOS simulator where Keychain is shared across
+        //      sim-device app installs, but UserDefaults is per-sandbox
+        //      and gets wiped on `simctl uninstall`).
+        //   2. Stale pointer (active wallet was deleted elsewhere).
+        // In both, the right repair is to default to the most-recently-
+        // created wallet so the user lands on Home, not Onboarding.
+        if let id = raw, descriptors.contains(where: { $0.id == id }) {
             return id
         }
-        // Stale pointer — repair to the most recent remaining wallet.
         let fallback = descriptors.sorted { $0.createdAt > $1.createdAt }.first?.id
         UserDefaults.standard.setValue(fallback, forKey: activeKeyDefault)
         return fallback
