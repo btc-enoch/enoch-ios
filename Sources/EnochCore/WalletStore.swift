@@ -114,6 +114,21 @@ public final class WalletStore {
         /// count. Cleared on the matching `deposit_minted` event.
         public var pendingDeposits: [String: PendingDepositUI] = [:]
 
+        /// Deposits we have already observed as minted on this wallet
+        /// (#373). Tracks `btc_txid` of every `deposit_minted` event
+        /// we've processed, so a stale `deposit_pending` event for the
+        /// same tx — arriving later via a different operator's SSE
+        /// stream that lags or never reaches Credited — is ignored
+        /// instead of re-rendering the "Crediting…" pill.
+        ///
+        /// Cleared on bootstrap() alongside pendingDeposits — fresh
+        /// SSE stream + fresh refresh repopulates whatever's truly
+        /// live. Bounded growth: in practice at most a handful per
+        /// session; if a wallet does enough deposits to make this set
+        /// large enough to care about, the wallet has bigger
+        /// memory-shape concerns first.
+        public var creditedDeposits: Set<String> = []
+
         /// Per-burn withdrawal lifecycle, keyed by burn_tx_hash. UI
         /// renders "Pending bridge confirmation" → "Sent to Bitcoin:
         /// <txid>" badges on burn rows from this map.
@@ -353,7 +368,7 @@ public final class WalletStore {
             // entry would otherwise stick around stale. Clearing on
             // bootstrap and trusting SSE to repopulate within ~5s
             // is the simplest reconciliation.
-            updateActive { $0.pendingDeposits.removeAll() }
+            updateActive { $0.pendingDeposits.removeAll(); $0.creditedDeposits.removeAll() }
             await refresh()
             startEventLoop()
         }
@@ -400,7 +415,7 @@ public final class WalletStore {
         eventTask = nil
         try refreshWalletList()
         connectionState = .idle
-        updateActive { $0.pendingDeposits.removeAll() }
+        updateActive { $0.pendingDeposits.removeAll(); $0.creditedDeposits.removeAll() }
         await refresh()
         startEventLoop()
     }
@@ -418,7 +433,7 @@ public final class WalletStore {
             eventTask = nil
             connectionState = .idle
             if hasWallet {
-                updateActive { $0.pendingDeposits.removeAll() }
+                updateActive { $0.pendingDeposits.removeAll(); $0.creditedDeposits.removeAll() }
                 await refresh()
                 startEventLoop()
             }
@@ -535,6 +550,11 @@ public final class WalletStore {
                         if let idx = available.firstIndex(of: pending.amountSatoshi) {
                             available.remove(at: idx)
                             state.pendingDeposits.removeValue(forKey: key)
+                            // #373: also register the credit so a
+                            // subsequent stale deposit_pending SSE
+                            // event for this btc_txid is suppressed,
+                            // not just cleared again on the next tick.
+                            state.creditedDeposits.insert(key)
                         }
                     }
                 }
@@ -647,6 +667,15 @@ public final class WalletStore {
                     stage: stage
                 )
                 updateActive { state in
+                    // #373: ignore deposit_pending arriving after the
+                    // matching deposit_minted has already credited
+                    // this wallet. Happens in K-of-N SSE fan-out when
+                    // one operator's local lifecycle lags (or, per
+                    // #372, never reaches Credited) and re-emits
+                    // pending ticks for an already-minted tx.
+                    if state.creditedDeposits.contains(payload.btcTxID) {
+                        return
+                    }
                     if let existing = state.pendingDeposits[payload.btcTxID],
                        existing.stage.rank > stage.rank {
                         return // ignore out-of-order regression
@@ -664,7 +693,13 @@ public final class WalletStore {
             // Refreshing here is idempotent with any tx_applied that
             // does arrive.
             if let payload = event.asDepositMinted(), payload.recipient == address {
-                updateActive { $0.pendingDeposits.removeValue(forKey: payload.btcTxID) }
+                updateActive { state in
+                    state.pendingDeposits.removeValue(forKey: payload.btcTxID)
+                    // #373: record the credit so a subsequent
+                    // deposit_pending event from a lagging operator
+                    // doesn't re-render the "Crediting…" pill.
+                    state.creditedDeposits.insert(payload.btcTxID)
+                }
                 await refresh()
             }
         case .unknown:
