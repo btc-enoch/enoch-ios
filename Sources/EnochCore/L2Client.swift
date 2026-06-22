@@ -47,8 +47,21 @@ public protocol L2Client: AnyObject {
 public final class FederationDirectL2Client: L2Client {
     public let inner: FederationDirectClient
 
-    public init(_ inner: FederationDirectClient) {
+    /// Receives a FederationDissentRecord for every cross-checked
+    /// call — including `.agreement` outcomes, which act as a
+    /// clear-signal for any prior dissent on the same op. Held
+    /// `weak` because the wallet store owns the L2Client and
+    /// conforms to DissentSink; a strong reverse reference would
+    /// cycle.
+    ///
+    /// Optional: when nil, dissent outcomes are silently collapsed
+    /// (the previous behaviour). All FederationDirectL2Client tests
+    /// that don't care about dissent surfacing leave this nil.
+    public weak var dissentSink: DissentSink?
+
+    public init(_ inner: FederationDirectClient, dissentSink: DissentSink? = nil) {
         self.inner = inner
+        self.dissentSink = dissentSink
     }
 
     public func getInfo() async throws -> OperatorInfo {
@@ -88,25 +101,34 @@ public final class FederationDirectL2Client: L2Client {
 
     /// Collapse a CrossCheckResult to a single value or a typed
     /// error. Naming the call site (`op`) keeps the resulting error
-    /// messages actionable in logs.
+    /// messages actionable in logs and matches the `op` field on the
+    /// FederationDissentRecord the sink receives.
+    ///
+    /// Emits exactly one record to `dissentSink` per call — including
+    /// `.agreement` outcomes, which the sink uses to clear any prior
+    /// dissent it was holding for this op. This means a transient
+    /// dissent (one bad refresh tick) self-clears as soon as the
+    /// federation reaches agreement again.
     private func collapse<T>(
         _ result: CrossCheckResult<T>,
         op: String
     ) throws -> T {
+        let now = Date()
         switch result {
         case .agreement(let value, _):
+            dissentSink?.record(.init(op: op, kind: .agreement, timestamp: now))
             return value
         case .majority(let value, _, let dissents):
-            // TODO(Slice F): surface to UI. For now, print so it's
-            // visible in dev. Mainnet builds get a warning UX
-            // before this lint flag is removed.
-            print("federation: dissent on \(op) — \(dissents.count) operator(s) disagreed")
+            let ids = dissents.map { $0.operatorID }
+            dissentSink?.record(.init(op: op, kind: .majority(dissenters: ids), timestamp: now))
             return value
         case .noMajority(let responses):
+            dissentSink?.record(.init(op: op, kind: .noMajority(distinctCount: responses.count), timestamp: now))
             throw L2ClientError.transport(
                 "federation: no majority on \(op) (\(responses.count) distinct responses)"
             )
         case .allFailed(let errors):
+            dissentSink?.record(.init(op: op, kind: .allFailed, timestamp: now))
             throw L2ClientError.transport(
                 "federation: all operators failed on \(op) (\(errors.count) errors)"
             )

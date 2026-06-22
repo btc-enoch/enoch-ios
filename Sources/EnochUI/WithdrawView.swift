@@ -23,6 +23,13 @@ struct WithdrawView: View {
 
     var body: some View {
         Form {
+            if !wallet.dissents.isEmpty {
+                Section {
+                    FederationStatusBanner(dissents: wallet.dissents)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
+            }
             Section {
                 Label("Withdraw to Bitcoin",
                       systemImage: "arrow.up.right.diamond.fill")
@@ -163,6 +170,10 @@ struct WithdrawView: View {
             && !bitcoinAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && parsedAmount != nil
             && wallet.feePerTxSatoshi != nil
+            // Slice F.3 (#371): block withdraws while federation
+            // disagrees on the wallet's state. The banner above
+            // explains why.
+            && !wallet.spendsBlockedByDissent
     }
 
     // MARK: - Submit

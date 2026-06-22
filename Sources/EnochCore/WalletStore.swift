@@ -61,6 +61,26 @@ public final class WalletStore {
     /// bridge redeem script, min_deposit_confirmations, …).
     public private(set) var operatorInfo: OperatorInfo?
 
+    /// Active cross-check dissents, keyed by op (balance / utxos /
+    /// address_history / pending_withdrawals) — at most one record
+    /// per op. Populated by FederationDirectL2Client via DissentSink
+    /// conformance below. Empty when the federation is in agreement
+    /// across all queried ops. The banner UI in EnochUI reads this
+    /// to render the dissent state.
+    ///
+    /// Slice F (#371). `.agreement` outcomes clear the corresponding
+    /// op's record automatically — a transient dissent that resolves
+    /// on the next refresh tick disappears without UI churn.
+    public private(set) var dissents: [FederationDissentRecord] = []
+
+    /// True when the wallet should hard-block spends — i.e. at least
+    /// one cross-check returned `.noMajority` or `.allFailed`. The
+    /// Send / Withdraw views read this to disable their confirm
+    /// buttons + show a reconciliation explanation.
+    public var spendsBlockedByDissent: Bool {
+        dissents.contains { $0.blocksSpends }
+    }
+
     // MARK: - Per-wallet projections of the active state.
     //
     // These read through to `states[activeWalletID]`. SwiftUI
@@ -309,6 +329,16 @@ public final class WalletStore {
     /// stale). On a fresh install the list is empty and the store
     /// stays in its onboarding-ready state.
     public func bootstrap() async {
+        // Slice F (#371): wire cross-check dissent surfacing. We do
+        // this here rather than in `init` because the FederationDirect
+        // case requires a weak back-reference, and init must stay
+        // nonisolated so the SwiftUI environment-key default value
+        // builds. bootstrap() runs in the MainActor envelope, where
+        // both `self` and `client` are addressable. The cast no-ops
+        // when an EdgeClient-style or test-mock L2Client is injected.
+        if let federationDirect = client as? FederationDirectL2Client {
+            federationDirect.dissentSink = self
+        }
         do {
             try refreshWalletList()
         } catch {
@@ -672,5 +702,35 @@ public final class WalletStore {
     static func taprootAddress(for pub: Secp256k1.PublicKey) throws -> String {
         let outputKey = try pub.taprootOutputKey()
         return try Address.encodeTaproot(outputKey: outputKey.bytes)
+    }
+
+    // MARK: - DissentSink
+
+    /// Apply a freshly-observed cross-check outcome to the in-memory
+    /// `dissents` array. Already on MainActor — called from the
+    /// nonisolated DissentSink shim below after hopping. Internal
+    /// rather than fileprivate so unit tests can drive it
+    /// synchronously without the Task hop dance.
+    func applyDissent(_ event: FederationDissentRecord) {
+        // One record per op: a fresh outcome wholly replaces any
+        // prior record for that op. .agreement records clear without
+        // adding anything.
+        dissents.removeAll { $0.op == event.op }
+        if event.isActiveDissent {
+            dissents.append(event)
+        }
+    }
+}
+
+// Sink conformance lives in an extension so the protocol surface is
+// visible separately from the storage. `nonisolated` because the L2
+// client calls this from whatever actor `collapse` happens to run
+// on (typically a background URLSession queue) — we hop to MainActor
+// inside before touching @Observable state.
+extension WalletStore: DissentSink {
+    public nonisolated func record(_ event: FederationDissentRecord) {
+        Task { @MainActor [weak self] in
+            self?.applyDissent(event)
+        }
     }
 }

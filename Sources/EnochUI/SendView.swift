@@ -25,6 +25,13 @@ struct SendView: View {
 
     var body: some View {
         Form {
+            if !wallet.dissents.isEmpty {
+                Section {
+                    FederationStatusBanner(dissents: wallet.dissents)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
+            }
             Section("Recipient") {
                 TextField("enoch1… or bc1q…", text: $recipient, axis: .vertical)
                     .autocorrectionDisabled()
@@ -155,6 +162,11 @@ struct SendView: View {
             && !recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && parsedAmount != nil
             && wallet.feePerTxSatoshi != nil
+            // Slice F.3 (#371): refuse to send while federation can't
+            // agree on the wallet's state. The user can still type and
+            // edit; only the Send button is blocked. The banner above
+            // explains why.
+            && !wallet.spendsBlockedByDissent
     }
 
     // MARK: - Submit

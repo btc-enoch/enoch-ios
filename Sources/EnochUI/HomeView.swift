@@ -16,6 +16,7 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                FederationStatusBanner(dissents: wallet.dissents)
                 BalanceCard(balance: wallet.balance, utxoCount: wallet.utxoCount)
                 if !wallet.pendingDeposits.isEmpty {
                     PendingDepositsCard(
